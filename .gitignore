@@ -1,0 +1,53 @@
+# =========================
+# Python / Backend
+# =========================
+backend/.venv/
+backend/venv/
+backend/__pycache__/
+backend/**/*.pyc
+backend/**/*.pyo
+backend/**/*.pyd
+backend/.env
+backend/*.sqlite3
+backend/*.db
+backend/.pytest_cache/
+backend/.mypy_cache/
+backend/.ruff_cache/
+backend/.coverage
+backend/htmlcov/
+
+# =========================
+# Frontend / Next.js
+# =========================
+frontend/node_modules/
+frontend/.next/
+frontend/out/
+frontend/dist/
+frontend/.env.local
+frontend/.env.development.local
+frontend/.env.production.local
+frontend/.env.test.local
+
+# =========================
+# General
+# =========================
+.env
+.env.*
+!.env.example
+.DS_Store
+Thumbs.db
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+.vscode/
+.idea/
+*.swp
+
+# =========================
+# Docker / local data
+# =========================
+docker-compose.override.yml
+postgres_data/
+qdrant_storage/
