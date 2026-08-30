@@ -9,7 +9,7 @@ class ChatRequest(BaseModel):
 class ItineraryDay(BaseModel):
     day: int
     title: str
-    items: List[str]
+    items: List[str] = Field(default_factory=list)
 
 
 class ChatResponse(BaseModel):
