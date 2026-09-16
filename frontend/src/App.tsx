@@ -8,7 +8,7 @@ interface AppProps {
   initialTheme?: "light" | "dark";
 }
 
-export function App({ initialTheme = "light" }: AppProps) {
+export function App({ initialTheme = "dark" }: AppProps) {
   const theme = useAppStore((s) => s.theme);
   const setTheme = useAppStore((s) => s.setTheme);
 
@@ -19,19 +19,21 @@ export function App({ initialTheme = "light" }: AppProps) {
   useEffect(() => {
     const root = document.documentElement;
 
-    if (theme === "dark") {
-      root.classList.add("dark");
+    if (theme === "light") {
+      root.classList.add("light");
     } else {
-      root.classList.remove("dark");
+      root.classList.remove("light");
     }
   }, [theme]);
 
   return (
-    <div className="flex h-full min-h-screen w-full bg-canvas font-sans text-ink">
+    <div className="flex h-screen w-full overflow-hidden bg-canvas font-sans text-ink">
       <Sidebar />
       <div className="flex min-w-0 flex-1 flex-col">
         <TopBar />
-        <Home />
+        <div className="flex min-w-0 flex-1 flex-col overflow-y-auto pt-16">
+          <Home />
+        </div>
       </div>
     </div>
   );

@@ -1,5 +1,5 @@
 import { create } from 'zustand'
-import type { Message } from '../types'
+import type { ChatResponse, ItineraryDay, Message } from '../types'
 
 type Theme = 'light' | 'dark'
 
@@ -21,7 +21,7 @@ interface AppState {
 
 const API_BASE = 'http://127.0.0.1:8000'
 
-function formatAssistantReply(data: any): string {
+function formatAssistantReply(data: ChatResponse): string {
   const lines: string[] = []
 
   if (data.destination) {
@@ -44,7 +44,7 @@ function formatAssistantReply(data: any): string {
   if (Array.isArray(data.itinerary) && data.itinerary.length > 0) {
     lines.push('')
     lines.push('Itinerary:')
-    data.itinerary.slice(0, 3).forEach((day: any) => {
+    data.itinerary.slice(0, 3).forEach((day: ItineraryDay) => {
       lines.push(`Day ${day.day}: ${day.title}`)
       if (Array.isArray(day.items)) {
         day.items.slice(0, 3).forEach((item: string) => {
@@ -63,7 +63,7 @@ function formatAssistantReply(data: any): string {
 }
 
 export const useAppStore = create<AppState>((set, get) => ({
-  theme: 'light',
+  theme: 'dark',
   sidebarOpen: false,
   activeNav: 'home',
   activeChatId: null,
@@ -126,13 +126,13 @@ export const useAppStore = create<AppState>((set, get) => ({
         throw new Error(`Backend error: ${response.status}`)
       }
 
-      const data = await response.json()
+      const data: ChatResponse = await response.json()
       const assistantText = formatAssistantReply(data)
 
       set((state) => ({
         isResponding: false,
         messages: state.messages.map((m) =>
-          m.id === `a-${stamp}` ? { ...m, pending: false, content: assistantText } : m,
+          m.id === `a-${stamp}` ? { ...m, pending: false, content: assistantText, plan: data } : m,
         ),
       }))
     } catch {

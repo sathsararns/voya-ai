@@ -3,6 +3,7 @@ import { motion } from 'framer-motion'
 import { SparklesIcon } from 'lucide-react'
 import { currentUser } from '../data/user'
 import { useAppStore } from '../hooks/useAppStore'
+import { ItineraryCard } from './ItineraryCard'
 
 function TypingDots() {
   return (
@@ -54,9 +55,11 @@ export function ChatThread() {
             <span className="flex h-8 w-8 shrink-0 items-center justify-center rounded-full bg-accent-soft text-accent">
               <SparklesIcon className="h-4 w-4" strokeWidth={2} />
             </span>
-            <div className="max-w-[80%] rounded-2xl rounded-tl-md border border-line bg-surface px-4 py-3 shadow-card">
+            <div className="max-w-[80%] rounded-2xl rounded-tl-md border border-line bg-surface px-4 py-3.5 shadow-card">
               {message.pending ? (
                 <TypingDots />
+              ) : message.plan ? (
+                <ItineraryCard plan={message.plan} fallback={message.content} />
               ) : (
                 <p className="whitespace-pre-wrap text-[15px] leading-6 text-ink">{message.content}</p>
               )}

@@ -31,7 +31,7 @@ export function Composer({ compact = false }: { compact?: boolean }) {
         e.preventDefault()
         submit()
       }}
-      className="rounded-2xl border border-line bg-surface p-4 shadow-card transition-colors duration-150 focus-within:border-accent/60 focus-within:ring-4 focus-within:ring-accent/10 sm:p-5"
+      className="rounded-2xl border border-line bg-surface/80 p-4 shadow-card backdrop-blur-xl transition-colors duration-150 focus-within:border-accent/60 focus-within:ring-4 focus-within:ring-accent/10 sm:p-5"
     >
       <div className="flex items-start gap-3">
         <SparklesIcon className="mt-1 h-5 w-5 shrink-0 text-accent" strokeWidth={2} />

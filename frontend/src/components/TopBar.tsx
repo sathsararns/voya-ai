@@ -10,7 +10,7 @@ export function TopBar() {
   const setSidebarOpen = useAppStore((s) => s.setSidebarOpen)
 
   return (
-    <header className="sticky top-0 z-30 flex items-center gap-3 border-b border-line bg-canvas/85 px-4 py-3 backdrop-blur-md sm:px-6">
+    <header className="fixed inset-x-0 top-0 z-40 flex h-16 items-center gap-3 border-b border-line bg-canvas/85 px-4 backdrop-blur-md sm:px-6 lg:left-[280px]">
       <button
         type="button"
         onClick={() => setSidebarOpen(true)}
@@ -47,7 +47,7 @@ export function TopBar() {
             alt={currentUser.name}
             className="h-10 w-10 rounded-full object-cover"
           />
-          <span className="absolute bottom-0 right-0 h-2.5 w-2.5 rounded-full border-2 border-canvas bg-emerald-500" />
+          <span className="absolute bottom-0 right-0 h-2.5 w-2.5 rounded-full border-2 border-canvas bg-teal" />
         </span>
       </div>
     </header>

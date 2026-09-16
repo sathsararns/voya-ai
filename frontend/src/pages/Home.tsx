@@ -49,25 +49,26 @@ export function Home() {
                   scale: { duration: 0.3, ease: [0.23, 1, 0.32, 1] },
                   y: { duration: 5, repeat: Infinity, ease: 'easeInOut' },
                 }}
-                className="h-20 w-20 rounded-full shadow-lift"
+                className="h-20 w-20 rounded-full shadow-glow"
                 style={{
                   background:
-                    'radial-gradient(circle at 32% 28%, #e9d5ff 0%, #a5b4fc 45%, #6366f1 100%)',
+                    'radial-gradient(circle at 30% 26%, #d9cbff 0%, #9c7bff 45%, #6d28d9 100%)',
                 }}
               />
-              <h1 className="mt-7 text-3xl font-bold tracking-tight text-ink sm:text-[34px]">
+              <p className="mt-7 text-base font-medium text-muted sm:text-lg">
                 {greeting()}, {currentUser.firstName} 👋
-              </h1>
-              <p className="mt-1 text-3xl font-bold tracking-tight text-ink sm:text-[34px]">
-                How Can I <span className="text-accent">Assist You Today?</span>
               </p>
+              <h1 className="mt-1 font-display text-[32px] font-bold tracking-tight text-ink sm:text-[42px]">
+                Where To <span className="text-accent">Next?</span>
+              </h1>
               <p className="mt-4 max-w-xl text-[15px] leading-6 text-muted">
-                I can help you plan trips, find places, create{' '}
-                <span className="font-semibold text-ink">itineraries</span> and more.
+                Tell me your vibe and budget — I'll sketch{' '}
+                <span className="font-semibold text-ink">day-by-day itineraries</span>, find
+                places to stay, and remember what you like for next time.
               </p>
             </div>
 
-            <div className="mt-9">
+            <div className="mt-8">
               <Composer />
             </div>
           </motion.div>

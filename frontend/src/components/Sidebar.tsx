@@ -2,15 +2,13 @@ import React from 'react'
 import { motion, AnimatePresence } from 'framer-motion'
 import {
   HomeIcon,
-  ClockIcon,
+  PlaneIcon,
   BookmarkIcon,
-  WalletIcon,
-  CircleUserIcon,
   SettingsIcon,
-  SearchIcon,
+  SparklesIcon,
+  CompassIcon,
   MessageSquareIcon,
   MoreVerticalIcon,
-  Compass,
   XIcon,
 } from 'lucide-react'
 import { navItems } from '../data/navigation'
@@ -21,97 +19,80 @@ import type { NavItem } from '../types'
 
 const icons: Record<NavItem['icon'], React.ElementType> = {
   home: HomeIcon,
-  history: ClockIcon,
+  trips: PlaneIcon,
   saved: BookmarkIcon,
-  budget: WalletIcon,
-  profile: CircleUserIcon,
   settings: SettingsIcon,
 }
 
-function SidebarContent({ onClose }: { onClose?: () => void }) {
+function NavButton({ item }: { item: NavItem }) {
   const activeNav = useAppStore((s) => s.activeNav)
   const setActiveNav = useAppStore((s) => s.setActiveNav)
-  const activeChatId = useAppStore((s) => s.activeChatId)
-  const openChat = useAppStore((s) => s.openChat)
+  const Icon = icons[item.icon]
+  const active = activeNav === item.id
 
   return (
-    <div className="grid h-full w-full grid-rows-[auto_auto_auto_minmax(0,1fr)_auto] overflow-hidden bg-surface">
-      {/* Header */}
-      <div className="flex items-start justify-between px-6 pb-5 pt-6">
-        <div className="flex items-center gap-3">
-          <span className="flex h-9 w-9 items-center justify-center rounded-xl bg-accent-soft text-accent">
-            <Compass className="h-5 w-5" strokeWidth={2.2} />
+    <li>
+      <button
+        type="button"
+        onClick={() => setActiveNav(item.id)}
+        aria-current={active ? 'page' : undefined}
+        className={`relative flex w-full items-center gap-3 rounded-xl px-3 py-2.5 text-sm transition-colors duration-150 ${
+          active
+            ? 'font-semibold text-accent'
+            : 'font-medium text-muted hover:bg-canvas hover:text-ink'
+        }`}
+      >
+        {active && (
+          <motion.span
+            layoutId="nav-active"
+            className="absolute inset-0 -z-10 rounded-xl bg-accent-soft"
+            transition={{ type: 'spring', stiffness: 420, damping: 34 }}
+          />
+        )}
+        <Icon className="h-[18px] w-[18px] shrink-0" strokeWidth={1.9} />
+        <span className="flex-1 truncate text-left">{item.label}</span>
+        {!!item.badge && (
+          <span className="flex h-5 min-w-5 shrink-0 items-center justify-center rounded-full bg-ink px-1.5 text-[11px] font-semibold text-canvas">
+            {item.badge}
           </span>
-          <div>
-            <h1 className="text-lg font-bold leading-tight text-ink">Voya AI</h1>
-            <p className="text-sm text-faint">Your Travel Assistant</p>
-          </div>
-        </div>
+        )}
+      </button>
+    </li>
+  )
+}
 
+function SidebarContent({ onClose }: { onClose?: () => void }) {
+  return (
+    <div className="grid h-full w-full grid-cols-1 grid-rows-[auto_auto_minmax(0,1fr)_auto] overflow-hidden bg-surface">
+      {/* Logo */}
+      <div className="flex items-center gap-2.5 px-5 pb-3 pt-5">
+        <span className="flex h-9 w-9 shrink-0 items-center justify-center rounded-xl bg-accent-soft text-accent">
+          <CompassIcon className="h-5 w-5" strokeWidth={2.2} />
+        </span>
+        <span className="font-display text-[17px] font-bold tracking-tight text-ink">Voya AI</span>
         {onClose && (
           <button
             type="button"
             onClick={onClose}
             aria-label="Close navigation"
-            className="rounded-lg p-1.5 text-muted transition-colors duration-150 hover:bg-canvas hover:text-ink lg:hidden"
+            className="ml-auto rounded-lg p-1.5 text-muted transition-colors duration-150 hover:bg-canvas hover:text-ink"
           >
             <XIcon className="h-5 w-5" />
           </button>
         )}
       </div>
 
-      {/* Search */}
-      <div className="px-4">
-        <label className="relative block">
-          <span className="sr-only">Search</span>
-          <SearchIcon className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-faint" />
-          <input
-            type="search"
-            placeholder="Search..."
-            className="h-11 w-full rounded-xl border border-line bg-surface pl-9 pr-12 text-sm text-ink outline-none transition-colors duration-150 placeholder:text-faint focus:border-accent focus:ring-2 focus:ring-accent/20"
-          />
-          <kbd className="pointer-events-none absolute right-3 top-1/2 -translate-y-1/2 text-[11px] font-medium text-faint">
-            ⌘K
-          </kbd>
-        </label>
-      </div>
-
-      {/* Nav */}
-      <nav aria-label="Main" className="mt-4 px-4">
+      {/* Main nav */}
+      <nav aria-label="Main" className="px-4 pt-1">
         <ul className="space-y-0.5">
-          {navItems.map((item) => {
-            const Icon = icons[item.icon]
-            const active = activeNav === item.id
-            return (
-              <li key={item.id}>
-                <button
-                  type="button"
-                  onClick={() => setActiveNav(item.id)}
-                  aria-current={active ? 'page' : undefined}
-                  className={`relative flex w-full items-center gap-3 rounded-xl px-3 py-2.5 text-sm transition-colors duration-150 ${
-                    active
-                      ? 'font-semibold text-accent'
-                      : 'font-medium text-muted hover:bg-canvas hover:text-ink'
-                  }`}
-                >
-                  {active && (
-                    <motion.span
-                      layoutId="nav-active"
-                      className="absolute inset-0 -z-10 rounded-xl bg-accent-soft"
-                      transition={{ type: 'spring', stiffness: 420, damping: 34 }}
-                    />
-                  )}
-                  <Icon className="h-[18px] w-[18px] shrink-0" strokeWidth={1.9} />
-                  <span className="truncate">{item.label}</span>
-                </button>
-              </li>
-            )
-          })}
+          {navItems.map((item) => (
+            <NavButton key={item.id} item={item} />
+          ))}
         </ul>
       </nav>
 
       {/* Recent chats - scroll area */}
-      <div className="min-h-0 px-4 pt-6">
+      <div className="flex min-h-0 flex-col overflow-hidden px-4 pt-5">
         <div className="flex items-center justify-between px-3 pb-2">
           <h2 className="text-[15px] font-semibold text-ink">Recent Chats</h2>
           <button
@@ -122,22 +103,10 @@ function SidebarContent({ onClose }: { onClose?: () => void }) {
           </button>
         </div>
 
-        <ul className="h-full space-y-0.5 overflow-y-auto pb-4 pr-1">
+        <ul className="min-h-0 flex-1 space-y-0.5 overflow-y-auto pb-4 pr-1">
           {recentChats.map((chat) => (
             <li key={chat.id}>
-              <button
-                type="button"
-                onClick={() => openChat(chat.id, chat.title)}
-                className={`group flex w-full items-center gap-2.5 rounded-lg px-3 py-2 text-left transition-colors duration-150 hover:bg-canvas ${
-                  activeChatId === chat.id ? 'bg-canvas' : ''
-                }`}
-              >
-                <MessageSquareIcon className="h-4 w-4 shrink-0 text-faint" strokeWidth={1.8} />
-                <span className="min-w-0 flex-1 truncate text-[14px] text-muted group-hover:text-ink">
-                  {chat.title}
-                </span>
-                <span className="shrink-0 text-[11px] text-faint">{chat.timestamp}</span>
-              </button>
+              <RecentChatButton chatId={chat.id} title={chat.title} timestamp={chat.timestamp} />
             </li>
           ))}
         </ul>
@@ -163,8 +132,45 @@ function SidebarContent({ onClose }: { onClose?: () => void }) {
             <MoreVerticalIcon className="h-4 w-4" />
           </button>
         </div>
+
+        <button
+          type="button"
+          className="mt-3 flex w-full items-center justify-center gap-2 rounded-full border border-accent/40 bg-accent-soft px-4 py-2.5 text-sm font-semibold text-accent transition-colors duration-150 hover:bg-accent/15"
+        >
+          <SparklesIcon className="h-4 w-4" strokeWidth={2.2} />
+          Upgrade to Pro
+        </button>
       </div>
     </div>
+  )
+}
+
+function RecentChatButton({
+  chatId,
+  title,
+  timestamp,
+}: {
+  chatId: string
+  title: string
+  timestamp: string
+}) {
+  const activeChatId = useAppStore((s) => s.activeChatId)
+  const openChat = useAppStore((s) => s.openChat)
+
+  return (
+    <button
+      type="button"
+      onClick={() => openChat(chatId, title)}
+      className={`group flex w-full items-center gap-2.5 rounded-lg px-3 py-2 text-left transition-colors duration-150 hover:bg-canvas ${
+        activeChatId === chatId ? 'bg-canvas' : ''
+      }`}
+    >
+      <MessageSquareIcon className="h-4 w-4 shrink-0 text-faint" strokeWidth={1.8} />
+      <span className="min-w-0 flex-1 truncate text-[14px] text-muted group-hover:text-ink">
+        {title}
+      </span>
+      <span className="shrink-0 text-[11px] text-faint">{timestamp}</span>
+    </button>
   )
 }
 
@@ -174,7 +180,7 @@ export function Sidebar() {
 
   return (
     <>
-      <aside className="sticky top-0 hidden h-screen w-[280px] shrink-0 overflow-hidden border-r border-line lg:block">
+      <aside className="hidden h-full w-[280px] shrink-0 overflow-hidden border-r border-line lg:block">
         <SidebarContent />
       </aside>
 
