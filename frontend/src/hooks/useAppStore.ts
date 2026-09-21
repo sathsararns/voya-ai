@@ -21,6 +21,44 @@ interface AppState {
 
 const API_BASE = 'http://127.0.0.1:8000'
 
+const SESSION_STORAGE_KEY = 'voya_session_id'
+let cachedSessionId: string | null = null
+
+function createSessionId(): string {
+  if (typeof crypto !== 'undefined' && 'randomUUID' in crypto) {
+    return crypto.randomUUID()
+  }
+  return `sess-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`
+}
+
+// Stable per-browser id, persisted so it survives reloads. Falls back to an
+// in-memory id (and skips persistence) if localStorage is unavailable, e.g.
+// private browsing — the session is still consistent for the current tab.
+function getOrCreateSessionId(): string {
+  if (cachedSessionId) return cachedSessionId
+
+  try {
+    const stored = window.localStorage.getItem(SESSION_STORAGE_KEY)
+    if (stored) {
+      cachedSessionId = stored
+      return cachedSessionId
+    }
+  } catch {
+    // localStorage unavailable — fall through and generate an in-memory id
+  }
+
+  const id = createSessionId()
+  cachedSessionId = id
+
+  try {
+    window.localStorage.setItem(SESSION_STORAGE_KEY, id)
+  } catch {
+    // best effort only
+  }
+
+  return id
+}
+
 function formatAssistantReply(data: ChatResponse): string {
   const lines: string[] = []
 
@@ -119,7 +157,7 @@ export const useAppStore = create<AppState>((set, get) => ({
         headers: {
           'Content-Type': 'application/json',
         },
-        body: JSON.stringify({ message: text }),
+        body: JSON.stringify({ message: text, session_id: getOrCreateSessionId() }),
       })
 
       if (!response.ok) {

@@ -6,6 +6,7 @@ class ChatHistory(Base):
     __tablename__ = "chat_history"
 
     id = Column(Integer, primary_key=True, index=True)
+    session_id = Column(String(255), nullable=True, index=True)
     user_message = Column(Text, nullable=False)
     assistant_reply = Column(Text, nullable=False)
     destination = Column(String(255), nullable=True)
