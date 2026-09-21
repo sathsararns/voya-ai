@@ -1,3 +1,5 @@
+from datetime import datetime
+
 from pydantic import BaseModel, Field
 from typing import List, Optional
 
@@ -20,3 +22,15 @@ class ChatResponse(BaseModel):
     summary: str
     itinerary: List[ItineraryDay] = Field(default_factory=list)
     follow_up_question: Optional[str] = None
+
+
+class ChatHistoryItem(BaseModel):
+    id: int
+    user_message: str
+    assistant_reply: ChatResponse
+    created_at: datetime
+
+
+class ChatHistoryResponse(BaseModel):
+    session_id: str
+    messages: List[ChatHistoryItem] = Field(default_factory=list)

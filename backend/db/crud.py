@@ -1,5 +1,5 @@
 import json
-from typing import Optional
+from typing import List, Optional
 
 from db.models import ChatHistory
 
@@ -16,3 +16,13 @@ def save_chat(db, user_message: str, assistant_reply: dict, session_id: Optional
     db.commit()
     db.refresh(record)
     return record
+
+
+def get_chat_history(db, session_id: str, limit: int = 50) -> List[ChatHistory]:
+    return (
+        db.query(ChatHistory)
+        .filter(ChatHistory.session_id == session_id)
+        .order_by(ChatHistory.created_at.asc())
+        .limit(limit)
+        .all()
+    )
