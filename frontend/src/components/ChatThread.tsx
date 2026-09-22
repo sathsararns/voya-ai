@@ -1,6 +1,6 @@
 import { useEffect, useRef } from 'react'
 import { motion } from 'framer-motion'
-import { SparklesIcon } from 'lucide-react'
+import voyaLogo from '../assets/voya-logo.jpg'
 import { currentUser } from '../data/user'
 import { useAppStore } from '../hooks/useAppStore'
 import { ItineraryCard } from './ItineraryCard'
@@ -40,7 +40,7 @@ export function ChatThread() {
             transition={{ duration: 0.22, ease: [0.23, 1, 0.32, 1] }}
             className="flex justify-end gap-3"
           >
-            <p className="max-w-[80%] whitespace-pre-wrap rounded-2xl rounded-tr-md bg-accent px-4 py-3 text-[15px] leading-6 text-white">
+            <p className="max-w-[80%] whitespace-pre-wrap rounded-2xl rounded-tr-md bg-accent px-4 py-3 text-[15px] leading-6 text-zinc-900">
               {message.content}
             </p>
             <img src={currentUser.avatar} alt="" className="h-8 w-8 shrink-0 rounded-full object-cover" />
@@ -53,10 +53,8 @@ export function ChatThread() {
             transition={{ duration: 0.22, ease: [0.23, 1, 0.32, 1] }}
             className="flex gap-3"
           >
-            <span className="flex h-8 w-8 shrink-0 items-center justify-center rounded-full bg-accent-soft text-accent">
-              <SparklesIcon className="h-4 w-4" strokeWidth={2} />
-            </span>
-            <div className="max-w-[80%] rounded-2xl rounded-tl-md border border-line bg-surface px-4 py-3.5 shadow-card">
+            <img src={voyaLogo} alt="Voya AI" className="h-8 w-8 shrink-0 rounded-full object-cover" />
+            <div className="max-w-[80%] rounded-2xl rounded-tl-md border border-line bg-surface px-4 py-3.5">
               {message.pending ? (
                 <TypingDots />
               ) : message.plan ? (

@@ -183,7 +183,7 @@ function toMessages(history: ChatHistoryResponse): Message[] {
 }
 
 export const useAppStore = create<AppState>((set, get) => ({
-  theme: 'dark',
+  theme: 'light',
   sidebarOpen: false,
   activeNav: 'home',
   messages: [],

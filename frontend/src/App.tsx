@@ -8,7 +8,7 @@ interface AppProps {
   initialTheme?: "light" | "dark";
 }
 
-export function App({ initialTheme = "dark" }: AppProps) {
+export function App({ initialTheme = "light" }: AppProps) {
   const theme = useAppStore((s) => s.theme);
   const setTheme = useAppStore((s) => s.setTheme);
   const initConversations = useAppStore((s) => s.initConversations);
@@ -34,9 +34,9 @@ export function App({ initialTheme = "dark" }: AppProps) {
   return (
     <div className="flex h-screen w-full overflow-hidden bg-canvas font-sans text-ink">
       <Sidebar />
-      <div className="flex min-w-0 flex-1 flex-col">
+      <div className="flex min-h-0 min-w-0 flex-1 flex-col">
         <TopBar />
-        <div className="flex min-w-0 flex-1 flex-col overflow-y-auto pt-16">
+        <div className="flex min-h-0 min-w-0 flex-1 flex-col pt-16">
           <Home />
         </div>
       </div>

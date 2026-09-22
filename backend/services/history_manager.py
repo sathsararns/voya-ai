@@ -151,11 +151,26 @@ def _summarize_messages(records: List[ChatHistory]) -> str:
 # --- public entry points -----------------------------------------------------
 
 
-def build_context(db: Session, conversation_id: str) -> ConversationContext:
-    """Load a conversation's history, trimming/summarizing it if it's grown long."""
+def build_context(
+    db: Session, conversation_id: str, prefer_summary: bool = False
+) -> ConversationContext:
+    """Load a conversation's history, trimming/summarizing it if it's grown long.
+
+    `prefer_summary` is set by the context_router when it judges the current
+    message is better served by a condensed view of the conversation (e.g. a
+    broad planning request) than by the exact raw recent turns. When True,
+    the threshold for summarizing drops from SUMMARY_TRIGGER down to
+    MAX_CONTEXT_MESSAGES — summarize as soon as there's anything older than
+    the always-kept recent window, instead of waiting for the conversation
+    to grow long on its own. It never forces a summary when there's nothing
+    to summarize: if total <= MAX_CONTEXT_MESSAGES, everything still fits in
+    the raw recent window regardless of this flag.
+    """
     total = count_conversation_messages(db, conversation_id)
 
-    if total <= SUMMARY_TRIGGER:
+    summarize_threshold = MAX_CONTEXT_MESSAGES if prefer_summary else SUMMARY_TRIGGER
+
+    if total <= summarize_threshold:
         recent = get_recent_messages(db, conversation_id, limit=MAX_CONTEXT_MESSAGES)
         return ConversationContext(
             summary=None,

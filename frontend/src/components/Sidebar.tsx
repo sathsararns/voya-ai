@@ -6,11 +6,11 @@ import {
   BookmarkIcon,
   SettingsIcon,
   SparklesIcon,
-  CompassIcon,
   MessageSquareIcon,
   MoreVerticalIcon,
   XIcon,
 } from 'lucide-react'
+import voyaLogo from '../assets/voya-logo.jpg'
 import { navItems } from '../data/navigation'
 import { currentUser } from '../data/user'
 import { useAppStore } from '../hooks/useAppStore'
@@ -45,9 +45,9 @@ function NavButton({ item }: { item: NavItem }) {
         type="button"
         onClick={() => setActiveNav(item.id)}
         aria-current={active ? 'page' : undefined}
-        className={`relative flex w-full items-center gap-3 rounded-xl px-3 py-2.5 text-sm transition-colors duration-150 ${
+        className={`relative flex w-full items-center gap-3 rounded-xl px-3 py-2.5 text-[14px] transition-colors duration-150 ${
           active
-            ? 'font-semibold text-accent'
+            ? 'font-semibold text-ink'
             : 'font-medium text-muted hover:bg-canvas hover:text-ink'
         }`}
       >
@@ -78,9 +78,7 @@ function SidebarContent({ onClose }: { onClose?: () => void }) {
     <div className="grid h-full w-full grid-cols-1 grid-rows-[auto_auto_minmax(0,1fr)_auto] overflow-hidden bg-surface">
       {/* Logo */}
       <div className="flex items-center gap-2.5 px-5 pb-3 pt-5">
-        <span className="flex h-9 w-9 shrink-0 items-center justify-center rounded-xl bg-accent-soft text-accent">
-          <CompassIcon className="h-5 w-5" strokeWidth={2.2} />
-        </span>
+        <img src={voyaLogo} alt="Voya AI" className="h-11 w-11 shrink-0 rounded-xl object-cover" />
         <span className="font-display text-[17px] font-bold tracking-tight text-ink">Voya AI</span>
         {onClose && (
           <button
@@ -109,7 +107,7 @@ function SidebarContent({ onClose }: { onClose?: () => void }) {
           <h2 className="text-[15px] font-semibold text-ink">Recent Chats</h2>
           <button
             type="button"
-            className="text-sm font-medium text-accent transition-opacity duration-150 hover:opacity-70"
+            className="text-sm font-medium text-ink transition-opacity duration-150 hover:opacity-70"
           >
             View all
           </button>
@@ -151,7 +149,7 @@ function SidebarContent({ onClose }: { onClose?: () => void }) {
 
         <button
           type="button"
-          className="mt-3 flex w-full items-center justify-center gap-2 rounded-full border border-accent/40 bg-accent-soft px-4 py-2.5 text-sm font-semibold text-accent transition-colors duration-150 hover:bg-accent/15"
+          className="mt-3 flex w-full items-center justify-center gap-2 rounded-full border border-accent/40 bg-accent-soft px-4 py-2.5 text-sm font-semibold text-ink transition-colors duration-150 hover:bg-accent/15"
         >
           <SparklesIcon className="h-4 w-4" strokeWidth={2.2} />
           Upgrade to Pro
@@ -186,7 +184,7 @@ function RecentChatButton({
       <span className="min-w-0 flex-1 truncate text-[14px] text-muted group-hover:text-ink">
         {title}
       </span>
-      <span className="shrink-0 text-[11px] text-faint">{timestamp}</span>
+      <span className="shrink-0 text-[11.5px] text-faint">{timestamp}</span>
     </button>
   )
 }

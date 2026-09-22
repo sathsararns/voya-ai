@@ -17,7 +17,7 @@ export function Home() {
   const hasThread = useAppStore((s) => s.messages.length > 0)
 
   return (
-    <main className="mx-auto flex w-full max-w-4xl flex-1 flex-col px-4 pb-10 pt-6 sm:px-6 sm:pt-10">
+    <main className="mx-auto flex min-h-0 w-full max-w-4xl flex-1 flex-col overflow-y-auto px-4 pt-6 sm:px-6 sm:pt-10">
       <AnimatePresence mode="wait">
         {isLoadingHistory ? (
           <motion.div
@@ -36,12 +36,12 @@ export function Home() {
             initial={{ opacity: 0 }}
             animate={{ opacity: 1 }}
             transition={{ duration: 0.22, ease: [0.23, 1, 0.32, 1] }}
-            className="flex flex-1 flex-col"
+            className="flex min-h-0 flex-1 flex-col"
           >
-            <div className="flex-1 pb-6">
+            <div className="min-h-0 flex-1 overflow-y-auto pb-6">
               <ChatThread />
             </div>
-            <div className="sticky bottom-0 bg-canvas pb-1 pt-3">
+            <div className="shrink-0 bg-canvas pb-4 pt-3">
               <Composer compact />
             </div>
           </motion.div>
@@ -51,6 +51,7 @@ export function Home() {
             initial={{ opacity: 0, y: 10 }}
             animate={{ opacity: 1, y: 0 }}
             transition={{ duration: 0.28, ease: [0.23, 1, 0.32, 1] }}
+            className="pb-10"
           >
             <div className="flex flex-col items-center text-center">
               <motion.div
@@ -72,7 +73,7 @@ export function Home() {
                 {greeting()}, {currentUser.firstName} 👋
               </p>
               <h1 className="mt-1 font-display text-[32px] font-bold tracking-tight text-ink sm:text-[42px]">
-                Where To <span className="text-accent">Next?</span>
+                Where To <span className="text-ink">Next?</span>
               </h1>
               <p className="mt-4 max-w-xl text-[15px] leading-6 text-muted">
                 Tell me your vibe and budget — I'll sketch{' '}

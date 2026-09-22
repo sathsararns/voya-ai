@@ -106,11 +106,10 @@ def decide_context_strategy(user_message: str, conversation_message_count: int) 
     # --- preferred shape of that history, if used: a precise follow-up
     # ("change day 3") needs the exact prior turn, not a lossy summary; a
     # broad planning request is better served by a compact summary of
-    # established facts than by replaying raw JSON. NOTE: this is advisory
-    # only right now — history_manager.build_context() still makes the
-    # actual raw-vs-summary call based on conversation length, independent
-    # of this flag (see the accompanying write-up for why, and what wiring
-    # this through would look like).
+    # established facts than by replaying raw JSON. Passed through to
+    # history_manager.build_context() as `prefer_summary` — it lowers the
+    # summarization threshold from SUMMARY_TRIGGER to MAX_CONTEXT_MESSAGES
+    # rather than forcing a summary outright (see that function's docstring).
     use_summarized_context = use_conversation_history and is_planning and not is_followup
 
     if is_greeting or is_short_command:

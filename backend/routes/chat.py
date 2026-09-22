@@ -92,7 +92,9 @@ def chat(request: ChatRequest, db: Session = Depends(get_db)):
 
     history = []
     if decision.use_conversation_history:
-        context = build_context(db, conversation_id)
+        context = build_context(
+            db, conversation_id, prefer_summary=decision.use_summarized_context
+        )
         history = to_groq_messages(context)
 
     reply_data = get_groq_reply(
