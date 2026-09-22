@@ -6,6 +6,14 @@ export interface ItineraryDay {
   items?: string[]
 }
 
+export interface KBSource {
+  title: string
+  document_name: string
+  chunk_index?: number | null
+  score?: number | null
+  snippet: string
+}
+
 export interface ChatResponse {
   destination?: string | null
   days?: number | null
@@ -14,6 +22,7 @@ export interface ChatResponse {
   itinerary?: ItineraryDay[]
   follow_up_question?: string | null
   conversation_id?: string | null
+  kb_sources?: KBSource[]
 }
 
 export interface Message {

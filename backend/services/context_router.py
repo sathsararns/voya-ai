@@ -60,8 +60,9 @@ PLANNING_KEYWORDS = {
 }
 
 # Factual, FAQ-style travel questions — grounded in the Pinecone knowledge
-# base (visa rules, currency, safety, customs) rather than in the user's own
-# past preferences (memory) or the current itinerary being built (history).
+# base (visa rules, currency, safety, customs, and now general destination
+# guide content — attractions, landmarks) rather than in the user's own past
+# preferences (memory) or the current itinerary being built (history).
 KNOWLEDGE_BASE_KEYWORDS = {
     "visa", "passport", "entry requirement", "customs", "currency",
     "exchange rate", "vaccination", "vaccine", "sim card", "voltage",
@@ -70,6 +71,9 @@ KNOWLEDGE_BASE_KEYWORDS = {
     "best time to visit", "language spoken", "time zone", "is it safe",
     "safety", "local custom", "dress code", "airport", "domestic flight",
     "health advisory", "travel insurance",
+    "things to do", "what to do", "places to visit", "worth visiting",
+    "attractions", "must see", "must-see", "where to visit", "landmark",
+    "tourist spot", "sightseeing",
 }
 
 

@@ -6,7 +6,7 @@ from dotenv import load_dotenv
 
 from json_utils import normalize_chat_response
 from pinecone_memory import format_memory_context
-from services.kb_rag import format_kb_context
+from services.kb_rag import build_kb_sources, format_kb_context, search_knowledge_base
 from services.response_validator import validate_ai_response
 
 load_dotenv()
@@ -68,7 +68,14 @@ def get_groq_reply(
         # (services/kb_rag.py) live in the same Pinecone index but separate
         # namespaces, so these two calls never touch each other's data.
         memory_context = format_memory_context(session_id, user_message, top_k=3) if use_memory else ""
-        kb_context = format_kb_context(user_message, top_k=4) if use_knowledge_base else ""
+
+        # One KB search, reused for both the prompt text (kb_context) and
+        # the UI source citations (kb_sources) — avoids a second Pinecone
+        # call and guarantees the citations shown to the user are exactly
+        # the chunks that actually grounded the answer.
+        kb_hits = search_knowledge_base(user_message, top_k=4) if use_knowledge_base else []
+        kb_context = format_kb_context(kb_hits)
+        kb_sources = build_kb_sources(kb_hits)
 
         system_prompt = SYSTEM_PROMPT
         if memory_context:
@@ -105,7 +112,9 @@ def get_groq_reply(
             retry_content = _call_groq(client, retry_messages, temperature=0.2)
             return normalize_chat_response(retry_content)
 
-        return validate_ai_response(user_message, normalized, retry_with_feedback)
+        validated = validate_ai_response(user_message, normalized, retry_with_feedback)
+        validated["kb_sources"] = kb_sources
+        return validated
 
     except Exception as e:
         return {
@@ -115,4 +124,5 @@ def get_groq_reply(
             "summary": f"Groq error: {str(e)}",
             "itinerary": [],
             "follow_up_question": "Please try again.",
+            "kb_sources": [],
         }

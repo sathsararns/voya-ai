@@ -61,6 +61,7 @@ def _deserialize_reply(raw_reply: str) -> dict:
             "summary": raw_reply or "",
             "itinerary": [],
             "follow_up_question": None,
+            "kb_sources": [],
         }
 
 

@@ -28,6 +28,20 @@ class ItineraryDay(BaseModel):
     items: List[str] = Field(default_factory=list)
 
 
+class KBSource(BaseModel):
+    """One knowledge-base chunk that grounded an answer — see
+    services/kb_rag.py build_kb_sources(), which is what actually produces
+    these. Kept separate from ChatHistoryItem's memory data; this only ever
+    describes knowledge_base-namespace hits, never Pinecone chat memory.
+    """
+
+    title: str
+    document_name: str
+    chunk_index: Optional[int] = None
+    score: Optional[float] = None
+    snippet: str
+
+
 class ChatResponse(BaseModel):
     destination: Optional[str] = None
     days: Optional[int] = None
@@ -36,6 +50,7 @@ class ChatResponse(BaseModel):
     itinerary: List[ItineraryDay] = Field(default_factory=list)
     follow_up_question: Optional[str] = None
     conversation_id: Optional[str] = None
+    kb_sources: List[KBSource] = Field(default_factory=list)
 
 
 class ChatHistoryItem(BaseModel):

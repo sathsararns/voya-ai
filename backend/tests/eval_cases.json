@@ -1,0 +1,72 @@
+[
+  {
+    "query": "What is Sigiriya and why is it famous?",
+    "expected_keywords": ["sigiriya", "lion rock"],
+    "expected_source": "Guide-Book-Sri-Lanka.pdf"
+  },
+  {
+    "query": "What currency is used in Sri Lanka?",
+    "expected_keywords": ["rupee", "lkr"],
+    "expected_source": "Guide-Book-Sri-Lanka.pdf"
+  },
+  {
+    "query": "How do tuk tuks work for getting around the island?",
+    "expected_keywords": ["tuktuk", "metered"],
+    "expected_source": "Guide-Book-Sri-Lanka.pdf"
+  },
+  {
+    "query": "What is train travel like in Sri Lanka?",
+    "expected_keywords": ["rail", "landscapes"],
+    "expected_source": "Guide-Book-Sri-Lanka.pdf"
+  },
+  {
+    "query": "Do I need mosquito repellent when traveling in Sri Lanka?",
+    "expected_keywords": ["mosquitos", "insect repellent"],
+    "expected_source": "Guide-Book-Sri-Lanka.pdf"
+  },
+  {
+    "query": "Tell me about the Temple of the Sacred Tooth in Kandy",
+    "expected_keywords": ["sacred tooth", "kandy"],
+    "expected_source": "Guide-Book-Sri-Lanka.pdf"
+  },
+  {
+    "query": "What makes Kandy special as a city?",
+    "expected_keywords": ["kandy", "hill city"],
+    "expected_source": "Guide-Book-Sri-Lanka.pdf"
+  },
+  {
+    "query": "What is the weather like and when is the best time to visit?",
+    "expected_keywords": ["monsoon", "weather"],
+    "expected_source": "Guide-Book-Sri-Lanka.pdf"
+  },
+  {
+    "query": "How much does a bus cost in Sri Lanka?",
+    "expected_keywords": ["bus", "public"],
+    "expected_source": "Guide-Book-Sri-Lanka.pdf"
+  },
+  {
+    "query": "Tell me about Bambarakanda Falls",
+    "expected_keywords": ["bambarakanda", "waterfall"],
+    "expected_source": "Guide-Book-Sri-Lanka.pdf"
+  },
+  {
+    "query": "What can I see at Jaffna Fort?",
+    "expected_keywords": ["jaffna", "fort"],
+    "expected_source": "Guide-Book-Sri-Lanka.pdf"
+  },
+  {
+    "query": "What animals can I see at Yala National Park?",
+    "expected_keywords": ["yala", "national park"],
+    "expected_source": "Guide-Book-Sri-Lanka.pdf"
+  },
+  {
+    "query": "What is Sri Lankan food like?",
+    "expected_keywords": ["cuisine", "spices"],
+    "expected_source": "Guide-Book-Sri-Lanka.pdf"
+  },
+  {
+    "query": "What is Colombo known for?",
+    "expected_keywords": ["colombo"],
+    "expected_source": "Guide-Book-Sri-Lanka.pdf"
+  }
+]

@@ -1,25 +1,33 @@
 """Ingestion pipeline for the travel knowledge-base RAG layer.
 
-Loads travel docs (.txt, .md, .pdf), splits them into overlapping chunks,
-and upserts them into the Pinecone knowledge-base namespace via kb_rag.py.
-Uses Pinecone's integrated embedding (the same upsert_records/search API
-pinecone_memory.py already uses for chat memory) — there's no separate
-embedding model call or extra API key to manage here.
+Loads travel docs (.txt, .md, .pdf) from backend/docs/, splits them into
+overlapping chunks, and upserts them into the Pinecone knowledge-base
+namespace via kb_rag.py. Uses Pinecone's integrated embedding (the same
+upsert_records/search API pinecone_memory.py already uses for chat memory)
+— there's no separate embedding model call or extra API key to manage here.
 
-Run directly to ingest a single file or every supported file in a directory:
+Run from the backend/ folder to ingest docs/ (the default) or any other
+file/directory:
 
-    python -m services.document_ingest path/to/docs
-    python -m services.document_ingest path/to/sri-lanka-visa-faq.pdf
+    python -m services.document_ingest
+    python -m services.document_ingest docs
+    python -m services.document_ingest docs/visa-rules.pdf
+    python -m services.document_ingest docs --query "do I need a visa?"
 """
 
+import argparse
 import os
 import re
 import sys
 from typing import Any, Dict, List, Optional
 
-from services.kb_rag import upsert_chunks
+from services.kb_rag import delete_document, search_knowledge_base, upsert_chunks
 
 SUPPORTED_EXTENSIONS = {".txt", ".md", ".pdf"}
+
+# Default target when no path is given — matches the docs/ folder created
+# under backend/, so the common case is just `python -m services.document_ingest`.
+DEFAULT_DOCS_DIR = "docs"
 
 # Character-based (not token-based) chunk size/overlap, to avoid needing a
 # tokenizer dependency — Pinecone's integrated embedding model handles the
@@ -116,12 +124,38 @@ def build_chunks(
     ]
 
 
-def ingest_file(path: str, source: Optional[str] = None, title: Optional[str] = None) -> int:
-    """Chunk and upsert a single file. Returns the number of chunks ingested."""
+def ingest_file(
+    path: str,
+    source: Optional[str] = None,
+    title: Optional[str] = None,
+    replace: bool = True,
+) -> int:
+    """Chunk and upsert a single file. Returns the number of chunks ingested.
+
+    replace=True (the default) deletes any existing chunks for this
+    document_name first, so re-running ingestion on the same file is safe —
+    it replaces the old chunks instead of piling up duplicates, and also
+    clears out stale trailing chunks if the document got shorter since the
+    last ingest (chunk ids alone can't catch that case; a same-named chunk
+    would just be overwritten, but a chunk that no longer exists wouldn't
+    be removed without this).
+    """
+    document_name = os.path.basename(path)
     chunks = build_chunks(path, source=source, title=title)
+
+    if replace:
+        delete_document(document_name)
+
     if not chunks:
+        print(
+            f"[document_ingest] WARNING: no extractable text in {document_name} - "
+            "likely a scanned/image-only PDF (OCR is not implemented here). Skipped."
+        )
         return 0
-    return upsert_chunks(chunks)
+
+    upserted = upsert_chunks(chunks)
+    print(f"[document_ingest] {document_name}: {upserted} chunk(s) upserted")
+    return upserted
 
 
 def ingest_path(path: str, source: Optional[str] = None) -> int:
@@ -139,11 +173,40 @@ def ingest_path(path: str, source: Optional[str] = None) -> int:
     return ingest_file(path, source=source)
 
 
+def _parse_args(argv: List[str]) -> argparse.Namespace:
+    parser = argparse.ArgumentParser(
+        description="Ingest travel documents (.pdf, .md, .txt) into the Pinecone knowledge-base namespace.",
+    )
+    parser.add_argument(
+        "path",
+        nargs="?",
+        default=DEFAULT_DOCS_DIR,
+        help=f"File or directory to ingest (default: {DEFAULT_DOCS_DIR})",
+    )
+    parser.add_argument(
+        "--query",
+        help="After ingesting, run a test retrieval search with this query and print the top matches.",
+    )
+    return parser.parse_args(argv)
+
+
 if __name__ == "__main__":
-    if len(sys.argv) < 2:
-        print("Usage: python -m services.document_ingest <file_or_directory>")
+    args = _parse_args(sys.argv[1:])
+
+    if not os.path.exists(args.path):
+        print(f"Path not found: {args.path}")
         sys.exit(1)
 
-    target = sys.argv[1]
-    count = ingest_path(target)
-    print(f"Ingested {count} chunk(s) from {target}")
+    count = ingest_path(args.path)
+    print(f"\nIngested {count} chunk(s) total from {args.path}")
+
+    if args.query:
+        print(f"\nTest retrieval for: {args.query!r}")
+        hits = search_knowledge_base(args.query, top_k=4)
+        if not hits:
+            print("  No matches found.")
+        for hit in hits:
+            fields = hit.get("fields", {})
+            title = fields.get("title") or fields.get("document_name") or "source"
+            snippet = (fields.get("text") or "")[:160].replace("\n", " ")
+            print(f"  [{hit.get('score'):.3f}] ({title}) {snippet}...")

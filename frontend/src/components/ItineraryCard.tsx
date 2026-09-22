@@ -1,5 +1,5 @@
 import type { ReactNode } from 'react'
-import { CalendarIcon, MapPinIcon, MessageCircleQuestionIcon, WalletIcon } from 'lucide-react'
+import { BookOpenIcon, CalendarIcon, MapPinIcon, MessageCircleQuestionIcon, WalletIcon } from 'lucide-react'
 import type { ChatResponse } from '../types'
 
 export function ItineraryCard({ plan, fallback }: { plan: ChatResponse; fallback: string }) {
@@ -87,6 +87,32 @@ export function ItineraryCard({ plan, fallback }: { plan: ChatResponse; fallback
           <MessageCircleQuestionIcon className="mt-0.5 h-4 w-4 shrink-0" strokeWidth={2.2} />
           {plan.follow_up_question}
         </p>
+      )}
+
+      {plan.kb_sources && plan.kb_sources.length > 0 && (
+        <div className="border-t border-line pt-3.5">
+          <p className="mb-1.5 flex items-center gap-1.5 text-[11px] font-semibold uppercase tracking-wide text-faint">
+            <BookOpenIcon className="h-3 w-3" strokeWidth={2.2} />
+            Travel knowledge used
+          </p>
+          <ul className="space-y-1">
+            {plan.kb_sources.map((source, i) => (
+              <li
+                key={`${source.document_name}-${source.chunk_index ?? i}`}
+                title={source.snippet}
+                className="truncate text-[12.5px] text-muted"
+              >
+                <span className="font-medium text-ink">{source.title}</span>
+                {typeof source.chunk_index === 'number' && (
+                  <span className="text-faint"> · chunk {source.chunk_index}</span>
+                )}
+                {typeof source.score === 'number' && (
+                  <span className="text-faint"> · {Math.round(source.score * 100)}% match</span>
+                )}
+              </li>
+            ))}
+          </ul>
+        </div>
       )}
     </div>
   )
