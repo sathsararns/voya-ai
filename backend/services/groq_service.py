@@ -6,8 +6,12 @@ from dotenv import load_dotenv
 
 from json_utils import normalize_chat_response
 from pinecone_memory import format_memory_context
+from services.kb_rag import format_kb_context
+from services.response_validator import validate_ai_response
 
 load_dotenv()
+
+GROQ_MODEL = "openai/gpt-oss-120b"
 
 SYSTEM_PROMPT = (
     "You are Voya AI, a travel assistant.\n"
@@ -33,25 +37,50 @@ SYSTEM_PROMPT = (
 )
 
 
+def _call_groq(client: Groq, messages: List[Dict[str, str]], temperature: float) -> str:
+    response = client.chat.completions.create(
+        model=GROQ_MODEL,
+        messages=messages,
+        reasoning_effort="low",
+        max_tokens=1024,
+        temperature=temperature,
+        response_format={"type": "json_object"},
+    )
+    return response.choices[0].message.content
+
+
 def get_groq_reply(
     user_message: str,
     session_id: Optional[str] = None,
     history: Optional[List[Dict[str, str]]] = None,
     use_memory: bool = True,
+    use_knowledge_base: bool = True,
 ) -> dict:
     api_key = os.getenv("GROQ_API_KEY")
     if not api_key:
         raise RuntimeError("GROQ_API_KEY is missing")
 
     try:
-        # use_memory comes from the context_router decision — when the
-        # router decides Pinecone memory isn't relevant to this message,
-        # skip the lookup entirely rather than querying and discarding it.
+        # use_memory/use_knowledge_base come from the context_router
+        # decision — when it decides a source isn't relevant to this
+        # message, skip that lookup entirely rather than querying and
+        # discarding it. Memory (pinecone_memory.py) and the knowledge base
+        # (services/kb_rag.py) live in the same Pinecone index but separate
+        # namespaces, so these two calls never touch each other's data.
         memory_context = format_memory_context(session_id, user_message, top_k=3) if use_memory else ""
+        kb_context = format_kb_context(user_message, top_k=4) if use_knowledge_base else ""
 
         system_prompt = SYSTEM_PROMPT
         if memory_context:
             system_prompt += f"\n{memory_context}\n"
+        if kb_context:
+            system_prompt += (
+                f"\n{kb_context}\n"
+                "\nGround any factual claims above (visas, currency, safety, "
+                "customs, weather, etc.) in those knowledge-base facts rather "
+                "than guessing. Don't list them as itinerary days unless the "
+                "user actually asked for an itinerary.\n"
+            )
 
         messages = [{"role": "system", "content": system_prompt}]
         if history:
@@ -59,17 +88,24 @@ def get_groq_reply(
         messages.append({"role": "user", "content": user_message})
 
         client = Groq(api_key=api_key)
-        response = client.chat.completions.create(
-            model="openai/gpt-oss-120b",
-            messages=messages,
-            reasoning_effort="low",
-            max_tokens=1024,
-            temperature=0.4,
-            response_format={"type": "json_object"},
-        )
+        content = _call_groq(client, messages, temperature=0.4)
+        normalized = normalize_chat_response(content)
 
-        content = response.choices[0].message.content
-        return normalize_chat_response(content)
+        def retry_with_feedback(issues: List[str]) -> dict:
+            # One stricter re-ask, telling the model exactly what was wrong
+            # with its last answer instead of just asking again blindly.
+            correction = (
+                "Your previous reply had these problems:\n"
+                + "\n".join(f"- {issue}" for issue in issues)
+                + "\nReturn ONE corrected JSON object that fixes all of them, still "
+                "matching the exact schema from the system prompt above. No markdown, "
+                "no extra text."
+            )
+            retry_messages = messages + [{"role": "user", "content": correction}]
+            retry_content = _call_groq(client, retry_messages, temperature=0.2)
+            return normalize_chat_response(retry_content)
+
+        return validate_ai_response(user_message, normalized, retry_with_feedback)
 
     except Exception as e:
         return {

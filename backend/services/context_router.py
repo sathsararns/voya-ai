@@ -25,6 +25,7 @@ class ContextDecision:
     use_conversation_history: bool
     use_pinecone_memory: bool
     use_summarized_context: bool
+    use_knowledge_base: bool
     route_reason: str
 
 
@@ -58,6 +59,19 @@ PLANNING_KEYWORDS = {
     "itinerary for",
 }
 
+# Factual, FAQ-style travel questions — grounded in the Pinecone knowledge
+# base (visa rules, currency, safety, customs) rather than in the user's own
+# past preferences (memory) or the current itinerary being built (history).
+KNOWLEDGE_BASE_KEYWORDS = {
+    "visa", "passport", "entry requirement", "customs", "currency",
+    "exchange rate", "vaccination", "vaccine", "sim card", "voltage",
+    "plug type", "power outlet", "emergency number", "tipping", "tip culture",
+    "public holiday", "weather", "climate", "rainy season", "monsoon",
+    "best time to visit", "language spoken", "time zone", "is it safe",
+    "safety", "local custom", "dress code", "airport", "domestic flight",
+    "health advisory", "travel insurance",
+}
+
 
 def _contains_any(text: str, phrases: set) -> bool:
     return any(phrase in text for phrase in phrases)
@@ -80,6 +94,7 @@ def decide_context_strategy(user_message: str, conversation_message_count: int) 
     is_preference = _contains_any(text, PREFERENCE_KEYWORDS)
     is_followup = _contains_any(text, FOLLOWUP_KEYWORDS)
     is_planning = _contains_any(text, PLANNING_KEYWORDS)
+    is_factual_question = _contains_any(text, KNOWLEDGE_BASE_KEYWORDS)
 
     # --- memory: worth it for preference statements (the whole point of
     # storing them) and for fresh planning requests (recalling past
@@ -112,6 +127,12 @@ def decide_context_strategy(user_message: str, conversation_message_count: int) 
     # rather than forcing a summary outright (see that function's docstring).
     use_summarized_context = use_conversation_history and is_planning and not is_followup
 
+    # --- knowledge base: independent of history/memory — a factual
+    # question ("do I need a visa?") can show up alongside a planning
+    # request or on its own, in a brand new conversation with no prior
+    # turns, so it isn't gated on has_prior_history the way history is.
+    use_knowledge_base = is_factual_question and not is_greeting and not is_short_command
+
     if is_greeting or is_short_command:
         route_reason = "greeting_or_short_command_no_retrieval"
     elif use_conversation_history and use_pinecone_memory:
@@ -125,9 +146,13 @@ def decide_context_strategy(user_message: str, conversation_message_count: int) 
     else:
         route_reason = "no_strong_signal_no_retrieval"
 
+    if use_knowledge_base:
+        route_reason += "+kb"
+
     return ContextDecision(
         use_conversation_history=use_conversation_history,
         use_pinecone_memory=use_pinecone_memory,
         use_summarized_context=use_summarized_context,
+        use_knowledge_base=use_knowledge_base,
         route_reason=route_reason,
     )

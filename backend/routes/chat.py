@@ -87,7 +87,8 @@ def chat(request: ChatRequest, db: Session = Depends(get_db)):
         f"[context_router] reason={decision.route_reason} "
         f"history={decision.use_conversation_history} "
         f"memory={decision.use_pinecone_memory} "
-        f"summarized={decision.use_summarized_context}"
+        f"summarized={decision.use_summarized_context} "
+        f"knowledge_base={decision.use_knowledge_base}"
     )
 
     history = []
@@ -102,6 +103,7 @@ def chat(request: ChatRequest, db: Session = Depends(get_db)):
         session_id,
         history=history,
         use_memory=decision.use_pinecone_memory,
+        use_knowledge_base=decision.use_knowledge_base,
     )
 
     save_chat(db, request.message, reply_data, session_id, conversation_id)

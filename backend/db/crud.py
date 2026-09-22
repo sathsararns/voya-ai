@@ -46,9 +46,20 @@ def get_or_create_conversation(
 
 
 def list_conversations(db, session_id: str, limit: int = 50) -> List[Conversation]:
+    """Conversations for this session that have at least one message.
+
+    A conversation row can exist with zero messages only in an edge case
+    (e.g. the request failed between creating it and saving the first
+    message) — filtering here keeps those from ever surfacing in the
+    sidebar as empty "New conversation" placeholders.
+    """
+    has_message = db.query(ChatHistory.conversation_id).filter(
+        ChatHistory.conversation_id.isnot(None)
+    )
     return (
         db.query(Conversation)
         .filter(Conversation.session_id == session_id)
+        .filter(Conversation.conversation_id.in_(has_message))
         .order_by(Conversation.updated_at.desc())
         .limit(limit)
         .all()

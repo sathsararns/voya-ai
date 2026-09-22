@@ -1,32 +1,61 @@
+import type { ReactNode } from 'react'
 import { CalendarIcon, MapPinIcon, MessageCircleQuestionIcon, WalletIcon } from 'lucide-react'
 import type { ChatResponse } from '../types'
 
 export function ItineraryCard({ plan, fallback }: { plan: ChatResponse; fallback: string }) {
-  const hasMeta = Boolean(plan.destination || typeof plan.days === 'number' || typeof plan.budget_lkr === 'number')
   const days = Array.isArray(plan.itinerary) ? plan.itinerary : []
+
+  // Built as a list (rather than adjacent JSX chips) so a real separator can
+  // be placed *between* entries. CSS `gap` alone only creates visual space —
+  // it inserts no actual character between sibling elements, so selecting or
+  // copying the rendered text (or anything else reading plain text instead
+  // of pixels) collapses them together, e.g. "Kandy5 days60,000 LKR".
+  const metaChips: Array<{ key: string; icon: ReactNode; label: string }> = []
+
+  if (plan.destination) {
+    metaChips.push({
+      key: 'destination',
+      icon: <MapPinIcon className="h-3.5 w-3.5 text-ink" strokeWidth={2.2} />,
+      label: plan.destination,
+    })
+  }
+  if (typeof plan.days === 'number') {
+    metaChips.push({
+      key: 'days',
+      icon: <CalendarIcon className="h-3.5 w-3.5 text-ink" strokeWidth={2.2} />,
+      label: `${plan.days} ${plan.days === 1 ? 'day' : 'days'}`,
+    })
+  }
+  if (typeof plan.budget_lkr === 'number') {
+    metaChips.push({
+      key: 'budget',
+      icon: <WalletIcon className="h-3.5 w-3.5 text-ink" strokeWidth={2.2} />,
+      label: `${plan.budget_lkr.toLocaleString()} LKR`,
+    })
+  }
 
   return (
     <div className="space-y-4">
-      {hasMeta && (
-        <div className="flex flex-wrap gap-2">
-          {plan.destination && (
-            <span className="inline-flex items-center gap-1.5 rounded-full border border-line bg-surface px-3 py-1 text-[12.5px] font-semibold text-ink">
-              <MapPinIcon className="h-3.5 w-3.5 text-ink" strokeWidth={2.2} />
-              {plan.destination}
-            </span>
-          )}
-          {typeof plan.days === 'number' && (
-            <span className="inline-flex items-center gap-1.5 rounded-full border border-line bg-surface px-3 py-1 text-[12.5px] font-semibold text-ink">
-              <CalendarIcon className="h-3.5 w-3.5 text-ink" strokeWidth={2.2} />
-              {plan.days} {plan.days === 1 ? 'day' : 'days'}
-            </span>
-          )}
-          {typeof plan.budget_lkr === 'number' && (
-            <span className="inline-flex items-center gap-1.5 rounded-full border border-line bg-surface px-3 py-1 text-[12.5px] font-semibold text-ink">
-              <WalletIcon className="h-3.5 w-3.5 text-ink" strokeWidth={2.2} />
-              {plan.budget_lkr.toLocaleString()} LKR
-            </span>
-          )}
+      {metaChips.length > 0 && (
+        <div>
+          <p className="mb-1.5 text-[11px] font-semibold uppercase tracking-wide text-faint">
+            Trip overview
+          </p>
+          <div className="flex flex-wrap items-center gap-2.5">
+            {metaChips.map((chip, index) => (
+              <span key={chip.key} className="inline-flex items-center gap-2.5">
+                <span className="inline-flex items-center gap-1.5 rounded-full border border-line bg-surface px-3 py-1 text-[12.5px] font-semibold text-ink">
+                  {chip.icon}
+                  {chip.label}
+                </span>
+                {index < metaChips.length - 1 && (
+                  <span aria-hidden="true" className="text-faint">
+                    ·
+                  </span>
+                )}
+              </span>
+            ))}
+          </div>
         </div>
       )}
 

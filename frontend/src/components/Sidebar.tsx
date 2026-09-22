@@ -176,12 +176,29 @@ function RecentChatButton({
     <button
       type="button"
       onClick={() => selectConversation(chatId)}
-      className={`group flex w-full items-center gap-2.5 rounded-lg px-3 py-2 text-left transition-colors duration-150 hover:bg-canvas ${
-        active ? 'bg-canvas' : ''
+      aria-current={active ? 'true' : undefined}
+      className={`group relative flex w-full items-center gap-2.5 rounded-lg px-3 py-2 text-left transition-colors duration-150 ${
+        active ? '' : 'hover:bg-canvas'
       }`}
     >
-      <MessageSquareIcon className="h-4 w-4 shrink-0 text-faint" strokeWidth={1.8} />
-      <span className="min-w-0 flex-1 truncate text-[14px] text-muted group-hover:text-ink">
+      {active && (
+        <motion.span
+          layoutId="recent-chat-active"
+          className="absolute inset-0 -z-10 rounded-lg border-l-2 border-l-ink bg-ink/6"
+          transition={{ type: 'spring', stiffness: 420, damping: 34 }}
+        />
+      )}
+      <MessageSquareIcon
+        className={`h-4 w-4 shrink-0 transition-colors duration-150 ${
+          active ? 'text-ink' : 'text-faint'
+        }`}
+        strokeWidth={1.8}
+      />
+      <span
+        className={`min-w-0 flex-1 truncate text-[14px] transition-colors duration-150 ${
+          active ? 'font-semibold text-ink' : 'text-muted group-hover:text-ink'
+        }`}
+      >
         {title}
       </span>
       <span className="shrink-0 text-[11.5px] text-faint">{timestamp}</span>

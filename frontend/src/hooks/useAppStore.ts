@@ -24,7 +24,7 @@ interface AppState {
   toggleTheme: () => void
   setSidebarOpen: (open: boolean) => void
   setActiveNav: (id: string) => void
-  newChat: () => Promise<void>
+  newChat: () => void
   send: (content: string) => Promise<void>
   initConversations: () => Promise<void>
   selectConversation: (conversationId: string) => Promise<void>
@@ -89,16 +89,12 @@ function setStoredConversationId(conversationId: string): void {
   }
 }
 
-async function apiCreateConversation(sessionId: string): Promise<Conversation> {
-  const response = await fetch(`${API_BASE}/api/v1/chat/conversations`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ session_id: sessionId }),
-  })
-  if (!response.ok) {
-    throw new Error(`Backend error: ${response.status}`)
+function clearStoredConversationId(): void {
+  try {
+    window.localStorage.removeItem(ACTIVE_CONVERSATION_STORAGE_KEY)
+  } catch {
+    // best effort only
   }
-  return response.json()
 }
 
 async function apiListConversations(sessionId: string): Promise<Conversation[]> {
@@ -198,8 +194,11 @@ export const useAppStore = create<AppState>((set, get) => ({
   setSidebarOpen: (sidebarOpen) => set({ sidebarOpen }),
   setActiveNav: (activeNav) => set({ activeNav, sidebarOpen: false }),
 
-  // Runs once on app start: loads this browser's conversation list, picks
-  // (or creates) the active one, and loads its messages.
+  // Runs once on app start: loads this browser's conversation list, and
+  // restores messages ONLY if there's an explicit stored active conversation
+  // id that still exists. There is no fallback to the most recent
+  // conversation — a blank "New Chat" draft (no stored id) must stay blank
+  // across a refresh instead of resurfacing an older conversation.
   initConversations: async () => {
     set({ isLoadingHistory: true, isLoadingConversations: true })
     const sessionId = getOrCreateSessionId()
@@ -207,12 +206,11 @@ export const useAppStore = create<AppState>((set, get) => ({
     try {
       const conversations = await apiListConversations(sessionId)
       const storedId = getStoredConversationId()
-      const active = conversations.find((c) => c.conversation_id === storedId) ?? conversations[0] ?? null
+      const active = storedId ? conversations.find((c) => c.conversation_id === storedId) ?? null : null
 
       set({ conversations, isLoadingConversations: false })
 
       if (active) {
-        setStoredConversationId(active.conversation_id)
         const history = await apiGetConversationMessages(active.conversation_id)
         set({
           activeConversationId: active.conversation_id,
@@ -222,15 +220,7 @@ export const useAppStore = create<AppState>((set, get) => ({
         return
       }
 
-      // Brand new browser/session — nothing exists yet, start one conversation.
-      const created = await apiCreateConversation(sessionId)
-      setStoredConversationId(created.conversation_id)
-      set({
-        activeConversationId: created.conversation_id,
-        conversations: [created],
-        messages: [],
-        isLoadingHistory: false,
-      })
+      set({ activeConversationId: null, messages: [], isLoadingHistory: false })
     } catch {
       // Backend unreachable — start with an empty, unsaved thread so the
       // composer still works locally.
@@ -264,28 +254,20 @@ export const useAppStore = create<AppState>((set, get) => ({
     }
   },
 
-  newChat: async () => {
-    const { activeConversationId, messages } = get()
-    set({ isResponding: false, sidebarOpen: false, activeNav: 'home' })
-
-    // Already on a fresh, empty conversation — nothing to create.
-    if (activeConversationId && messages.length === 0) {
-      return
-    }
-
-    try {
-      const created = await apiCreateConversation(getOrCreateSessionId())
-      setStoredConversationId(created.conversation_id)
-      set((state) => ({
-        activeConversationId: created.conversation_id,
-        conversations: [created, ...state.conversations],
-        messages: [],
-      }))
-    } catch {
-      // Backend unreachable — clear the visible thread locally. The next
-      // successful send() will get (or create) a conversation on its own.
-      set({ messages: [], activeConversationId: null })
-    }
+  // Purely local: clears the thread and detaches from any active
+  // conversation, and forgets the persisted active-conversation id so a
+  // refresh doesn't resurrect the old conversation. No backend call —
+  // nothing is persisted until the user actually sends a message (send()
+  // lazily creates the conversation then).
+  newChat: () => {
+    clearStoredConversationId()
+    set({
+      isResponding: false,
+      sidebarOpen: false,
+      activeNav: 'home',
+      messages: [],
+      activeConversationId: null,
+    })
   },
 
   send: async (content) => {

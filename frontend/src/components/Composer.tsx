@@ -22,7 +22,7 @@ export function Composer({ compact = false }: { compact?: boolean }) {
         e.preventDefault()
         submit()
       }}
-      className="rounded-2xl border border-line bg-surface/80 p-4 backdrop-blur-xl transition-colors duration-150 focus-within:border-accent/60 focus-within:ring-4 focus-within:ring-accent/10 sm:p-5"
+      className="rounded-2xl border border-line bg-surface/80 p-4 backdrop-blur-xl transition-all duration-200 focus-within:border-2 focus-within:border-ink/35 sm:p-5"
     >
       <div className="flex items-start gap-3">
         <img src={voyaLogo} alt="Voya AI" className="mt-1 h-5 w-5 shrink-0 rounded-md object-cover" />
