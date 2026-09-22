@@ -3,6 +3,7 @@ import { ChatThread } from '../components/ChatThread'
 import { currentUser } from '../data/user'
 import { useAppStore } from '../hooks/useAppStore'
 import { AnimatePresence, motion } from 'framer-motion'
+import { Loader2Icon } from 'lucide-react'
 
 function greeting(): string {
   const hour = new Date().getHours()
@@ -12,12 +13,24 @@ function greeting(): string {
 }
 
 export function Home() {
+  const isLoadingHistory = useAppStore((s) => s.isLoadingHistory)
   const hasThread = useAppStore((s) => s.messages.length > 0)
 
   return (
     <main className="mx-auto flex w-full max-w-4xl flex-1 flex-col px-4 pb-10 pt-6 sm:px-6 sm:pt-10">
       <AnimatePresence mode="wait">
-        {hasThread ? (
+        {isLoadingHistory ? (
+          <motion.div
+            key="loading"
+            initial={{ opacity: 0 }}
+            animate={{ opacity: 1 }}
+            exit={{ opacity: 0 }}
+            transition={{ duration: 0.2 }}
+            className="flex flex-1 items-center justify-center"
+          >
+            <Loader2Icon className="h-6 w-6 animate-spin text-faint" />
+          </motion.div>
+        ) : hasThread ? (
           <motion.div
             key="thread"
             initial={{ opacity: 0 }}

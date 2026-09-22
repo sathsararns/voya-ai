@@ -13,6 +13,7 @@ export interface ChatResponse {
   summary: string
   itinerary?: ItineraryDay[]
   follow_up_question?: string | null
+  conversation_id?: string | null
 }
 
 export interface Message {
@@ -28,6 +29,30 @@ export interface RecentChat {
   id: string
   title: string
   timestamp: string
+}
+
+export interface ChatHistoryItem {
+  id: number
+  user_message: string
+  assistant_reply: ChatResponse
+  created_at: string
+}
+
+export interface ChatHistoryResponse {
+  conversation_id: string
+  messages: ChatHistoryItem[]
+}
+
+export interface Conversation {
+  conversation_id: string
+  session_id: string
+  title: string | null
+  created_at: string
+  updated_at: string
+}
+
+export interface ConversationListResponse {
+  conversations: Conversation[]
 }
 
 export type NavIcon = 'home' | 'trips' | 'saved' | 'settings'

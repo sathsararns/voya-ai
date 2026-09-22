@@ -12,10 +12,19 @@ import {
   XIcon,
 } from 'lucide-react'
 import { navItems } from '../data/navigation'
-import { recentChats } from '../data/chats'
 import { currentUser } from '../data/user'
 import { useAppStore } from '../hooks/useAppStore'
-import type { NavItem } from '../types'
+import type { Conversation, NavItem, RecentChat } from '../types'
+
+const CONVERSATION_TITLE_FALLBACK = 'New conversation'
+
+function toRecentChats(conversations: Conversation[]): RecentChat[] {
+  return conversations.map((c) => ({
+    id: c.conversation_id,
+    title: c.title?.trim() ? c.title : CONVERSATION_TITLE_FALLBACK,
+    timestamp: new Date(c.updated_at).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
+  }))
+}
 
 const icons: Record<NavItem['icon'], React.ElementType> = {
   home: HomeIcon,
@@ -62,6 +71,9 @@ function NavButton({ item }: { item: NavItem }) {
 }
 
 function SidebarContent({ onClose }: { onClose?: () => void }) {
+  const conversations = useAppStore((s) => s.conversations)
+  const recentChats = toRecentChats(conversations)
+
   return (
     <div className="grid h-full w-full grid-cols-1 grid-rows-[auto_auto_minmax(0,1fr)_auto] overflow-hidden bg-surface">
       {/* Logo */}
@@ -103,13 +115,17 @@ function SidebarContent({ onClose }: { onClose?: () => void }) {
           </button>
         </div>
 
-        <ul className="min-h-0 flex-1 space-y-0.5 overflow-y-auto pb-4 pr-1">
-          {recentChats.map((chat) => (
-            <li key={chat.id}>
-              <RecentChatButton chatId={chat.id} title={chat.title} timestamp={chat.timestamp} />
-            </li>
-          ))}
-        </ul>
+        {recentChats.length > 0 ? (
+          <ul className="min-h-0 flex-1 space-y-0.5 overflow-y-auto pb-4 pr-1">
+            {recentChats.map((chat) => (
+              <li key={chat.id}>
+                <RecentChatButton chatId={chat.id} title={chat.title} timestamp={chat.timestamp} />
+              </li>
+            ))}
+          </ul>
+        ) : (
+          <p className="px-3 pb-4 text-sm text-faint">No conversations yet.</p>
+        )}
       </div>
 
       {/* Footer */}
@@ -154,15 +170,16 @@ function RecentChatButton({
   title: string
   timestamp: string
 }) {
-  const activeChatId = useAppStore((s) => s.activeChatId)
-  const openChat = useAppStore((s) => s.openChat)
+  const activeConversationId = useAppStore((s) => s.activeConversationId)
+  const selectConversation = useAppStore((s) => s.selectConversation)
+  const active = activeConversationId === chatId
 
   return (
     <button
       type="button"
-      onClick={() => openChat(chatId, title)}
+      onClick={() => selectConversation(chatId)}
       className={`group flex w-full items-center gap-2.5 rounded-lg px-3 py-2 text-left transition-colors duration-150 hover:bg-canvas ${
-        activeChatId === chatId ? 'bg-canvas' : ''
+        active ? 'bg-canvas' : ''
       }`}
     >
       <MessageSquareIcon className="h-4 w-4 shrink-0 text-faint" strokeWidth={1.8} />

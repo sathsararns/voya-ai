@@ -11,10 +11,15 @@ interface AppProps {
 export function App({ initialTheme = "dark" }: AppProps) {
   const theme = useAppStore((s) => s.theme);
   const setTheme = useAppStore((s) => s.setTheme);
+  const initConversations = useAppStore((s) => s.initConversations);
 
   useEffect(() => {
     setTheme(initialTheme);
   }, [initialTheme, setTheme]);
+
+  useEffect(() => {
+    initConversations();
+  }, [initConversations]);
 
   useEffect(() => {
     const root = document.documentElement;

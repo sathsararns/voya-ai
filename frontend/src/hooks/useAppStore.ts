@@ -1,5 +1,12 @@
 import { create } from 'zustand'
-import type { ChatResponse, ItineraryDay, Message } from '../types'
+import type {
+  ChatHistoryResponse,
+  ChatResponse,
+  Conversation,
+  ConversationListResponse,
+  ItineraryDay,
+  Message,
+} from '../types'
 
 type Theme = 'light' | 'dark'
 
@@ -7,16 +14,21 @@ interface AppState {
   theme: Theme
   sidebarOpen: boolean
   activeNav: string
-  activeChatId: string | null
   messages: Message[]
   isResponding: boolean
+  isLoadingHistory: boolean
+  conversations: Conversation[]
+  activeConversationId: string | null
+  isLoadingConversations: boolean
   setTheme: (theme: Theme) => void
   toggleTheme: () => void
   setSidebarOpen: (open: boolean) => void
   setActiveNav: (id: string) => void
-  openChat: (id: string, title: string) => Promise<void>
-  newChat: () => void
+  newChat: () => Promise<void>
   send: (content: string) => Promise<void>
+  initConversations: () => Promise<void>
+  selectConversation: (conversationId: string) => Promise<void>
+  refreshConversations: () => Promise<void>
 }
 
 const API_BASE = 'http://127.0.0.1:8000'
@@ -24,11 +36,11 @@ const API_BASE = 'http://127.0.0.1:8000'
 const SESSION_STORAGE_KEY = 'voya_session_id'
 let cachedSessionId: string | null = null
 
-function createSessionId(): string {
+function createId(): string {
   if (typeof crypto !== 'undefined' && 'randomUUID' in crypto) {
     return crypto.randomUUID()
   }
-  return `sess-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`
+  return `id-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`
 }
 
 // Stable per-browser id, persisted so it survives reloads. Falls back to an
@@ -47,7 +59,7 @@ function getOrCreateSessionId(): string {
     // localStorage unavailable — fall through and generate an in-memory id
   }
 
-  const id = createSessionId()
+  const id = createId()
   cachedSessionId = id
 
   try {
@@ -57,6 +69,55 @@ function getOrCreateSessionId(): string {
   }
 
   return id
+}
+
+const ACTIVE_CONVERSATION_STORAGE_KEY = 'voya_active_conversation_id'
+
+function getStoredConversationId(): string | null {
+  try {
+    return window.localStorage.getItem(ACTIVE_CONVERSATION_STORAGE_KEY)
+  } catch {
+    return null
+  }
+}
+
+function setStoredConversationId(conversationId: string): void {
+  try {
+    window.localStorage.setItem(ACTIVE_CONVERSATION_STORAGE_KEY, conversationId)
+  } catch {
+    // best effort only
+  }
+}
+
+async function apiCreateConversation(sessionId: string): Promise<Conversation> {
+  const response = await fetch(`${API_BASE}/api/v1/chat/conversations`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ session_id: sessionId }),
+  })
+  if (!response.ok) {
+    throw new Error(`Backend error: ${response.status}`)
+  }
+  return response.json()
+}
+
+async function apiListConversations(sessionId: string): Promise<Conversation[]> {
+  const response = await fetch(
+    `${API_BASE}/api/v1/chat/conversations?session_id=${encodeURIComponent(sessionId)}`,
+  )
+  if (!response.ok) {
+    throw new Error(`Backend error: ${response.status}`)
+  }
+  const data: ConversationListResponse = await response.json()
+  return data.conversations
+}
+
+async function apiGetConversationMessages(conversationId: string): Promise<ChatHistoryResponse> {
+  const response = await fetch(`${API_BASE}/api/v1/chat/conversations/${conversationId}/messages`)
+  if (!response.ok) {
+    throw new Error(`Backend error: ${response.status}`)
+  }
+  return response.json()
 }
 
 function formatAssistantReply(data: ChatResponse): string {
@@ -100,39 +161,131 @@ function formatAssistantReply(data: ChatResponse): string {
   return lines.join('\n')
 }
 
+function toMessages(history: ChatHistoryResponse): Message[] {
+  return history.messages.flatMap((item) => {
+    const createdAt = new Date(item.created_at).getTime()
+    return [
+      {
+        id: `h-u-${item.id}`,
+        role: 'user' as const,
+        content: item.user_message,
+        createdAt,
+      },
+      {
+        id: `h-a-${item.id}`,
+        role: 'assistant' as const,
+        content: formatAssistantReply(item.assistant_reply),
+        createdAt,
+        plan: item.assistant_reply,
+      },
+    ]
+  })
+}
+
 export const useAppStore = create<AppState>((set, get) => ({
   theme: 'dark',
   sidebarOpen: false,
   activeNav: 'home',
-  activeChatId: null,
   messages: [],
   isResponding: false,
+  isLoadingHistory: false,
+  conversations: [],
+  activeConversationId: null,
+  isLoadingConversations: false,
 
   setTheme: (theme) => set({ theme }),
   toggleTheme: () => set({ theme: get().theme === 'light' ? 'dark' : 'light' }),
   setSidebarOpen: (sidebarOpen) => set({ sidebarOpen }),
   setActiveNav: (activeNav) => set({ activeNav, sidebarOpen: false }),
 
-  openChat: async (id, title) => {
-    set({
-      activeChatId: id,
-      sidebarOpen: false,
-      messages: [],
-      isResponding: false,
-      activeNav: 'home',
-    })
+  // Runs once on app start: loads this browser's conversation list, picks
+  // (or creates) the active one, and loads its messages.
+  initConversations: async () => {
+    set({ isLoadingHistory: true, isLoadingConversations: true })
+    const sessionId = getOrCreateSessionId()
 
-    await get().send(title)
+    try {
+      const conversations = await apiListConversations(sessionId)
+      const storedId = getStoredConversationId()
+      const active = conversations.find((c) => c.conversation_id === storedId) ?? conversations[0] ?? null
+
+      set({ conversations, isLoadingConversations: false })
+
+      if (active) {
+        setStoredConversationId(active.conversation_id)
+        const history = await apiGetConversationMessages(active.conversation_id)
+        set({
+          activeConversationId: active.conversation_id,
+          messages: toMessages(history),
+          isLoadingHistory: false,
+        })
+        return
+      }
+
+      // Brand new browser/session — nothing exists yet, start one conversation.
+      const created = await apiCreateConversation(sessionId)
+      setStoredConversationId(created.conversation_id)
+      set({
+        activeConversationId: created.conversation_id,
+        conversations: [created],
+        messages: [],
+        isLoadingHistory: false,
+      })
+    } catch {
+      // Backend unreachable — start with an empty, unsaved thread so the
+      // composer still works locally.
+      set({ isLoadingHistory: false, isLoadingConversations: false })
+    }
   },
 
-  newChat: () => {
-    set({
-      messages: [],
-      activeChatId: null,
-      isResponding: false,
-      sidebarOpen: false,
-      activeNav: 'home',
-    })
+  refreshConversations: async () => {
+    try {
+      const conversations = await apiListConversations(getOrCreateSessionId())
+      set({ conversations })
+    } catch {
+      // best effort only — sidebar just keeps its last known list
+    }
+  },
+
+  selectConversation: async (conversationId) => {
+    if (get().activeConversationId === conversationId) {
+      set({ sidebarOpen: false })
+      return
+    }
+
+    setStoredConversationId(conversationId)
+    set({ activeConversationId: conversationId, sidebarOpen: false, isLoadingHistory: true })
+
+    try {
+      const history = await apiGetConversationMessages(conversationId)
+      set({ messages: toMessages(history), isLoadingHistory: false })
+    } catch {
+      set({ messages: [], isLoadingHistory: false })
+    }
+  },
+
+  newChat: async () => {
+    const { activeConversationId, messages } = get()
+    set({ isResponding: false, sidebarOpen: false, activeNav: 'home' })
+
+    // Already on a fresh, empty conversation — nothing to create.
+    if (activeConversationId && messages.length === 0) {
+      return
+    }
+
+    try {
+      const created = await apiCreateConversation(getOrCreateSessionId())
+      setStoredConversationId(created.conversation_id)
+      set((state) => ({
+        activeConversationId: created.conversation_id,
+        conversations: [created, ...state.conversations],
+        messages: [],
+      }))
+    } catch {
+      // Backend unreachable — clear the visible thread locally. The next
+      // successful send() will get (or create) a conversation on its own.
+      set({ messages: [], activeConversationId: null })
+    }
   },
 
   send: async (content) => {
@@ -140,6 +293,8 @@ export const useAppStore = create<AppState>((set, get) => ({
     if (!text || get().isResponding) return
 
     const stamp = Date.now()
+    const sessionId = getOrCreateSessionId()
+    let conversationId = get().activeConversationId
 
     set((state) => ({
       isResponding: true,
@@ -157,7 +312,7 @@ export const useAppStore = create<AppState>((set, get) => ({
         headers: {
           'Content-Type': 'application/json',
         },
-        body: JSON.stringify({ message: text, session_id: getOrCreateSessionId() }),
+        body: JSON.stringify({ message: text, session_id: sessionId, conversation_id: conversationId }),
       })
 
       if (!response.ok) {
@@ -167,12 +322,24 @@ export const useAppStore = create<AppState>((set, get) => ({
       const data: ChatResponse = await response.json()
       const assistantText = formatAssistantReply(data)
 
+      // Covers the rare case where no conversation existed yet and the
+      // backend created one on the fly.
+      if (data.conversation_id && data.conversation_id !== conversationId) {
+        conversationId = data.conversation_id
+        setStoredConversationId(conversationId)
+        set({ activeConversationId: conversationId })
+      }
+
       set((state) => ({
         isResponding: false,
         messages: state.messages.map((m) =>
           m.id === `a-${stamp}` ? { ...m, pending: false, content: assistantText, plan: data } : m,
         ),
       }))
+
+      // Title/ordering may have changed server-side (touch_conversation) —
+      // refresh in the background so the sidebar reflects it.
+      get().refreshConversations()
     } catch {
       set((state) => ({
         isResponding: false,
