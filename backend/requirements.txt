@@ -8,3 +8,9 @@ groq
 pinecone
 pypdf
 fonttools
+pytest
+alembic
+argon2-cffi
+pyjwt
+redis
+email-validator

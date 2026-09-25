@@ -1,4 +1,5 @@
 import { create } from 'zustand'
+import { api } from '../lib/api'
 import type {
   ChatHistoryResponse,
   ChatResponse,
@@ -29,9 +30,8 @@ interface AppState {
   initConversations: () => Promise<void>
   selectConversation: (conversationId: string) => Promise<void>
   refreshConversations: () => Promise<void>
+  resetConversations: () => void
 }
-
-const API_BASE = 'http://127.0.0.1:8000'
 
 const SESSION_STORAGE_KEY = 'voya_session_id'
 let cachedSessionId: string | null = null
@@ -43,9 +43,23 @@ function createId(): string {
   return `id-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`
 }
 
-// Stable per-browser id, persisted so it survives reloads. Falls back to an
-// in-memory id (and skips persistence) if localStorage is unavailable, e.g.
-// private browsing — the session is still consistent for the current tab.
+// Stable per-browser id, persisted so it survives reloads — but NOT per
+// account: it deliberately stays the same across login/logout/switching
+// accounts in the same browser. This app only ever loads/reads Recent
+// Chats from inside ProtectedRoute, i.e. once a real user is already known
+// (see components/auth/ProtectedRoute.tsx) — so it is NEVER sent for
+// listing or reading conversations (see apiListConversations /
+// apiGetConversationMessages below); user_id, from the httpOnly session
+// cookie every authenticated request already sends, is the only thing
+// that ever scopes Recent Chats. It's still sent on send() (POST
+// /api/v1/chat/), where it has a different, unrelated job: Pinecone
+// conversational-memory continuity (see backend/pinecone_memory.py) and
+// the anonymous-caller fallback the backend still supports for direct API
+// callers with no session cookie (see routes/chat.py's
+// get_current_user_optional) — not Recent Chats ownership. Falls back to
+// an in-memory id (and skips persistence) if localStorage is unavailable,
+// e.g. private browsing — the session is still consistent for the current
+// tab.
 function getOrCreateSessionId(): string {
   if (cachedSessionId) return cachedSessionId
 
@@ -71,49 +85,72 @@ function getOrCreateSessionId(): string {
   return id
 }
 
-const ACTIVE_CONVERSATION_STORAGE_KEY = 'voya_active_conversation_id'
-
-function getStoredConversationId(): string | null {
-  try {
-    return window.localStorage.getItem(ACTIVE_CONVERSATION_STORAGE_KEY)
-  } catch {
-    return null
-  }
-}
-
-function setStoredConversationId(conversationId: string): void {
-  try {
-    window.localStorage.setItem(ACTIVE_CONVERSATION_STORAGE_KEY, conversationId)
-  } catch {
-    // best effort only
-  }
-}
-
-function clearStoredConversationId(): void {
-  try {
-    window.localStorage.removeItem(ACTIVE_CONVERSATION_STORAGE_KEY)
-  } catch {
-    // best effort only
-  }
-}
-
-async function apiListConversations(sessionId: string): Promise<Conversation[]> {
-  const response = await fetch(
-    `${API_BASE}/api/v1/chat/conversations?session_id=${encodeURIComponent(sessionId)}`,
-  )
-  if (!response.ok) {
-    throw new Error(`Backend error: ${response.status}`)
-  }
-  const data: ConversationListResponse = await response.json()
+async function apiListConversations(): Promise<Conversation[]> {
+  // No session_id in this request, deliberately — this call only ever
+  // happens for an authenticated caller (see initConversations/
+  // refreshConversations below, both only reachable from inside
+  // ProtectedRoute), and `api` (see lib/api.ts) already sends the httpOnly
+  // session cookie with every request. The backend scopes the result by
+  // that cookie's user_id alone — see routes/chat.py's get_conversations
+  // and db/crud.py's list_conversations, which never even reads session_id
+  // once a caller is authenticated. Sending it here would be inert at
+  // best; omitting it entirely is what makes that guarantee visible and
+  // unambiguous at the call site, not just at the backend.
+  const data = await api.get<ConversationListResponse>('/api/v1/chat/conversations')
   return data.conversations
 }
 
 async function apiGetConversationMessages(conversationId: string): Promise<ChatHistoryResponse> {
-  const response = await fetch(`${API_BASE}/api/v1/chat/conversations/${conversationId}/messages`)
-  if (!response.ok) {
-    throw new Error(`Backend error: ${response.status}`)
+  return api.get<ChatHistoryResponse>(`/api/v1/chat/conversations/${conversationId}/messages`)
+}
+
+// Mirrors backend/routes/chat.py's CONVERSATION_TITLE_MAX_LENGTH /
+// _default_title() exactly, so the optimistic entry send() inserts below
+// looks identical to what the next real refresh will show — this value is
+// only ever used for that one optimistic frame, never persisted or sent
+// anywhere.
+const CONVERSATION_TITLE_MAX_LENGTH = 60
+
+function defaultTitle(message: string): string {
+  const text = message.trim()
+  return text.length > CONVERSATION_TITLE_MAX_LENGTH
+    ? `${text.slice(0, CONVERSATION_TITLE_MAX_LENGTH)}…`
+    : text
+}
+
+// Inserts or bumps a conversation in the sidebar list immediately, from
+// data already in hand — no network round-trip required. This is what
+// makes "a sent chat appears in Recent Chats" NOT depend on a second
+// request (refreshConversations) ever succeeding: that second request
+// still runs afterward to reconcile with the server's exact state, but by
+// the time it fires the entry is already visible. Mirrors the backend's
+// own rules exactly (see db/crud.py's touch_conversation): a brand-new
+// conversation gets a title derived from this first message; an existing
+// one keeps its original title and only its updated_at (and therefore its
+// position — list_conversations orders by updated_at desc) changes.
+function upsertConversationOptimistically(
+  conversations: Conversation[],
+  conversationId: string,
+  sessionId: string,
+  firstMessage: string,
+): Conversation[] {
+  const now = new Date().toISOString()
+  const existingIndex = conversations.findIndex((c) => c.conversation_id === conversationId)
+
+  if (existingIndex === -1) {
+    const optimisticEntry: Conversation = {
+      conversation_id: conversationId,
+      session_id: sessionId,
+      title: defaultTitle(firstMessage),
+      created_at: now,
+      updated_at: now,
+    }
+    return [optimisticEntry, ...conversations]
   }
-  return response.json()
+
+  const touched = { ...conversations[existingIndex], updated_at: now }
+  const rest = conversations.filter((_, i) => i !== existingIndex)
+  return [touched, ...rest]
 }
 
 function formatAssistantReply(data: ChatResponse): string {
@@ -194,47 +231,85 @@ export const useAppStore = create<AppState>((set, get) => ({
   setSidebarOpen: (sidebarOpen) => set({ sidebarOpen }),
   setActiveNav: (activeNav) => set({ activeNav, sidebarOpen: false }),
 
-  // Runs once on app start: loads this browser's conversation list, and
-  // restores messages ONLY if there's an explicit stored active conversation
-  // id that still exists. There is no fallback to the most recent
-  // conversation — a blank "New Chat" draft (no stored id) must stay blank
-  // across a refresh instead of resurfacing an older conversation.
+  // Runs once on app start (and again every time ChatApp mounts — i.e.
+  // every fresh login, since navigating to /login and back necessarily
+  // unmounts/remounts it) to load this browser's conversation list for the
+  // sidebar. NEVER auto-restores a previous conversation as active — app
+  // start/refresh always lands on the blank welcome/composer state. A
+  // conversation only ever becomes active when the user explicitly clicks
+  // one in Recent Chats (selectConversation) or sends a first message
+  // (send(), which lazily creates one).
+  //
+  // Clears conversations/messages/activeConversationId SYNCHRONOUSLY,
+  // before the fetch even starts — this is what stops one account's Recent
+  // Chats from being visible, even briefly, right after switching to a
+  // different account in the same browser tab. Without this, the previous
+  // account's list would stay in this store (a separate Zustand store from
+  // useAuthStore, so logging out never touched it) until the new fetch
+  // resolved — or indefinitely, if that fetch ever failed, since the old
+  // code's catch block only cleared loading flags, not the stale list
+  // itself.
+  //
+  // Guards against a concurrent call with an early return — useAuthStore's
+  // subscription (see useAuthStore.ts) and ChatApp's own mount effect can
+  // both call this within the same tick right after a login, and running
+  // the fetch twice in parallel is wasted work, not a correctness issue,
+  // but worth skipping.
   initConversations: async () => {
-    set({ isLoadingHistory: true, isLoadingConversations: true })
-    const sessionId = getOrCreateSessionId()
+    if (get().isLoadingConversations) return
+
+    set({
+      conversations: [],
+      messages: [],
+      activeConversationId: null,
+      isLoadingHistory: true,
+      isLoadingConversations: true,
+    })
 
     try {
-      const conversations = await apiListConversations(sessionId)
-      const storedId = getStoredConversationId()
-      const active = storedId ? conversations.find((c) => c.conversation_id === storedId) ?? null : null
-
-      set({ conversations, isLoadingConversations: false })
-
-      if (active) {
-        const history = await apiGetConversationMessages(active.conversation_id)
-        set({
-          activeConversationId: active.conversation_id,
-          messages: toMessages(history),
-          isLoadingHistory: false,
-        })
-        return
-      }
-
-      set({ activeConversationId: null, messages: [], isLoadingHistory: false })
+      const conversations = await apiListConversations()
+      set({
+        conversations,
+        isLoadingConversations: false,
+        activeConversationId: null,
+        messages: [],
+        isLoadingHistory: false,
+      })
     } catch {
-      // Backend unreachable — start with an empty, unsaved thread so the
-      // composer still works locally.
+      // Backend unreachable — stay on the empty state already set above
+      // (never fall back to a stale, possibly-another-account's list) so
+      // the composer still works locally.
       set({ isLoadingHistory: false, isLoadingConversations: false })
     }
   },
 
   refreshConversations: async () => {
     try {
-      const conversations = await apiListConversations(getOrCreateSessionId())
+      const conversations = await apiListConversations()
       set({ conversations })
-    } catch {
-      // best effort only — sidebar just keeps its last known list
+    } catch (error) {
+      // Best effort — the sidebar just keeps its last known list. This
+      // used to swallow the error completely, which made a genuine
+      // backend/network failure here indistinguishable from "nothing went
+      // wrong" from outside a debugger — logging it costs nothing and
+      // makes a real failure diagnosable instead of invisible.
+      console.error('[useAppStore] refreshConversations failed:', error)
     }
+  },
+
+  // Called from useAuthStore's logout() — this store is entirely separate
+  // from auth state, so logging out never touches it on its own. Without
+  // this, the window between logout and the next account's ChatApp
+  // remounting (which re-triggers initConversations) would still have this
+  // store holding the previous account's conversations/messages.
+  resetConversations: () => {
+    set({
+      conversations: [],
+      messages: [],
+      activeConversationId: null,
+      isLoadingConversations: false,
+      isLoadingHistory: false,
+    })
   },
 
   selectConversation: async (conversationId) => {
@@ -243,7 +318,6 @@ export const useAppStore = create<AppState>((set, get) => ({
       return
     }
 
-    setStoredConversationId(conversationId)
     set({ activeConversationId: conversationId, sidebarOpen: false, isLoadingHistory: true })
 
     try {
@@ -255,12 +329,9 @@ export const useAppStore = create<AppState>((set, get) => ({
   },
 
   // Purely local: clears the thread and detaches from any active
-  // conversation, and forgets the persisted active-conversation id so a
-  // refresh doesn't resurrect the old conversation. No backend call —
-  // nothing is persisted until the user actually sends a message (send()
-  // lazily creates the conversation then).
+  // conversation. No backend call — nothing is persisted until the user
+  // actually sends a message (send() lazily creates the conversation then).
   newChat: () => {
-    clearStoredConversationId()
     set({
       isResponding: false,
       sidebarOpen: false,
@@ -289,26 +360,20 @@ export const useAppStore = create<AppState>((set, get) => ({
     }))
 
     try {
-      const response = await fetch(`${API_BASE}/api/v1/chat/`, {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-        },
-        body: JSON.stringify({ message: text, session_id: sessionId, conversation_id: conversationId }),
+      // credentials are sent by `api` — when logged in, this conversation
+      // is created/continued under the caller's account (see
+      // routes/chat.py), not just this browser's session_id.
+      const data = await api.post<ChatResponse>('/api/v1/chat/', {
+        message: text,
+        session_id: sessionId,
+        conversation_id: conversationId,
       })
-
-      if (!response.ok) {
-        throw new Error(`Backend error: ${response.status}`)
-      }
-
-      const data: ChatResponse = await response.json()
       const assistantText = formatAssistantReply(data)
 
       // Covers the rare case where no conversation existed yet and the
       // backend created one on the fly.
       if (data.conversation_id && data.conversation_id !== conversationId) {
         conversationId = data.conversation_id
-        setStoredConversationId(conversationId)
         set({ activeConversationId: conversationId })
       }
 
@@ -317,11 +382,37 @@ export const useAppStore = create<AppState>((set, get) => ({
         messages: state.messages.map((m) =>
           m.id === `a-${stamp}` ? { ...m, pending: false, content: assistantText, plan: data } : m,
         ),
+        // Insert/bump Recent Chats immediately, from data already in
+        // hand — this is the actual guarantee that a sent chat appears,
+        // not the network refresh below. See
+        // upsertConversationOptimistically's own comment for why.
+        conversations: conversationId
+          ? upsertConversationOptimistically(state.conversations, conversationId, sessionId, text)
+          : state.conversations,
       }))
 
-      // Title/ordering may have changed server-side (touch_conversation) —
-      // refresh in the background so the sidebar reflects it.
-      get().refreshConversations()
+      // Reconciles with the server's exact state afterward (the real
+      // title text vs. this file's mirrored truncation, the precise
+      // updated_at, etc.) — awaited so it's still a deterministic part of
+      // send() completing, but its failure no longer means the sidebar
+      // shows nothing: the optimistic update above already guarantees
+      // that. isResponding is already false by this point, so none of
+      // this delays the message itself appearing "sent" to the user.
+      await get().refreshConversations()
+
+      // refreshConversations() does a full replace (set({ conversations })),
+      // not a merge — if that response ever comes back without the
+      // conversation just sent (a delayed/incomplete/wrong response, for
+      // any reason, including ones no test here can reproduce), it would
+      // silently erase the optimistic entry above instead of just failing
+      // to improve on it. This is the actual guarantee: whatever the
+      // reconciliation step returns, the just-sent conversation can never
+      // regress to "not there" as a result of it.
+      if (conversationId && !get().conversations.some((c) => c.conversation_id === conversationId)) {
+        set((state) => ({
+          conversations: upsertConversationOptimistically(state.conversations, conversationId!, sessionId, text),
+        }))
+      }
     } catch {
       set((state) => ({
         isResponding: false,

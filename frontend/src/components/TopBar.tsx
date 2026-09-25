@@ -1,13 +1,14 @@
 import { motion } from 'framer-motion'
 import { MenuIcon, MoonIcon, PlusIcon, SunIcon } from 'lucide-react'
-import { currentUser } from '../data/user'
 import { useAppStore } from '../hooks/useAppStore'
+import { useAuthStore } from '../hooks/useAuthStore'
 
 export function TopBar() {
   const theme = useAppStore((s) => s.theme)
   const toggleTheme = useAppStore((s) => s.toggleTheme)
   const newChat = useAppStore((s) => s.newChat)
   const setSidebarOpen = useAppStore((s) => s.setSidebarOpen)
+  const user = useAuthStore((s) => s.user)
 
   return (
     <header className="fixed inset-x-0 top-0 z-40 flex h-16 items-center gap-3 border-b border-line bg-canvas/85 px-4 backdrop-blur-md sm:px-6 lg:left-[280px]">
@@ -42,11 +43,9 @@ export function TopBar() {
         </button>
 
         <span className="relative shrink-0">
-          <img
-            src={currentUser.avatar}
-            alt={currentUser.name}
-            className="h-10 w-10 rounded-full object-cover"
-          />
+          <span className="flex h-10 w-10 items-center justify-center rounded-full bg-accent-soft text-sm font-semibold text-ink">
+            {(user?.name ?? '?').charAt(0).toUpperCase()}
+          </span>
           <span className="absolute bottom-0 right-0 h-2.5 w-2.5 rounded-full border-2 border-canvas bg-teal" />
         </span>
       </div>

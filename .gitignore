@@ -15,6 +15,7 @@ backend/.mypy_cache/
 backend/.ruff_cache/
 backend/.coverage
 backend/htmlcov/
+backend/scripts/backups/
 
 # =========================
 # Frontend / Next.js

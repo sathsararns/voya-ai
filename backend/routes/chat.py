@@ -1,7 +1,8 @@
 import json
+from typing import Optional
 from uuid import uuid4
 
-from fastapi import APIRouter, Depends, Query
+from fastapi import APIRouter, Depends, HTTPException, Query, status
 from sqlalchemy.orm import Session
 
 from schemas.chat import (
@@ -16,9 +17,11 @@ from schemas.chat import (
 from services.groq_service import get_groq_reply
 from services.history_manager import build_context, to_groq_messages
 from services.context_router import decide_context_strategy
+from db.models import User
 from db.session import SessionLocal
 from db.crud import (
     save_chat,
+    get_conversation,
     get_conversation_messages,
     count_conversation_messages,
     create_conversation,
@@ -28,6 +31,7 @@ from db.crud import (
 )
 from pinecone_memory import save_memory
 from memory_utils import build_memory_text
+from routes.auth import get_current_user_optional
 
 router = APIRouter(prefix="/api/v1/chat", tags=["chat"])
 
@@ -73,9 +77,14 @@ def _default_title(user_message: str) -> str:
 
 
 @router.post("/", response_model=ChatResponse)
-def chat(request: ChatRequest, db: Session = Depends(get_db)):
+def chat(
+    request: ChatRequest,
+    db: Session = Depends(get_db),
+    current_user: Optional[User] = Depends(get_current_user_optional),
+):
     session_id = request.session_id or FALLBACK_SESSION_ID
-    conversation = get_or_create_conversation(db, session_id, request.conversation_id)
+    user_id = current_user.id if current_user else None
+    conversation = get_or_create_conversation(db, session_id, request.conversation_id, user_id=user_id)
     conversation_id = conversation.conversation_id
 
     # Agentic RAG decision layer: figure out which context sources this
@@ -131,9 +140,14 @@ def chat(request: ChatRequest, db: Session = Depends(get_db)):
 
 
 @router.post("/conversations", response_model=ConversationResponse)
-def create_new_conversation(request: ConversationCreateRequest, db: Session = Depends(get_db)):
+def create_new_conversation(
+    request: ConversationCreateRequest,
+    db: Session = Depends(get_db),
+    current_user: Optional[User] = Depends(get_current_user_optional),
+):
     session_id = request.session_id or FALLBACK_SESSION_ID
-    conversation = create_conversation(db, session_id, request.title)
+    user_id = current_user.id if current_user else None
+    conversation = create_conversation(db, session_id, request.title, user_id=user_id)
     return ConversationResponse(
         conversation_id=conversation.conversation_id,
         session_id=conversation.session_id,
@@ -145,11 +159,31 @@ def create_new_conversation(request: ConversationCreateRequest, db: Session = De
 
 @router.get("/conversations", response_model=ConversationListResponse)
 def get_conversations(
-    session_id: str = Query(...),
+    session_id: Optional[str] = Query(default=None),
     limit: int = Query(default=50, ge=1, le=200),
     db: Session = Depends(get_db),
+    current_user: Optional[User] = Depends(get_current_user_optional),
 ):
-    conversations = list_conversations(db, session_id, limit=limit)
+    # A logged-in caller is scoped by account (session_id, if sent, is
+    # ignored — see list_conversations) so switching accounts in the same
+    # browser only ever shows that account's own chats, and the frontend no
+    # longer sends session_id for this call at all once authenticated (see
+    # useAppStore.ts's apiListConversations). An anonymous caller still
+    # needs a session_id to scope by, same as before auth existed — but
+    # with neither a session cookie nor a session_id, there is simply no
+    # identity to list conversations for. That's not a malformed request
+    # (every field the client sent, or omitted, was valid on its own), so
+    # it isn't a 400 — it's "nothing to show yet", the same empty result a
+    # real caller with zero conversations would get. This also means a
+    # brief window where the session cookie hasn't landed yet (e.g. right
+    # after login, before it's committed) degrades to an empty list rather
+    # than a hard error.
+    if current_user is None and not session_id:
+        return ConversationListResponse(conversations=[])
+
+    conversations = list_conversations(
+        db, session_id=session_id, user_id=current_user.id if current_user else None, limit=limit
+    )
     return ConversationListResponse(
         conversations=[
             ConversationResponse(
@@ -169,7 +203,18 @@ def get_conversation_history(
     conversation_id: str,
     limit: int = Query(default=100, ge=1, le=500),
     db: Session = Depends(get_db),
+    current_user: Optional[User] = Depends(get_current_user_optional),
 ):
+    # Same ownership rule as get_or_create_conversation: a conversation's
+    # owner (None for anonymous) must match the caller exactly. Without
+    # this, any caller who learned a conversation_id — by guessing a UUID
+    # is infeasible, but e.g. a shared link, browser history, or a bug
+    # elsewhere — could read another account's messages by id alone.
+    conversation = get_conversation(db, conversation_id)
+    caller_id = current_user.id if current_user else None
+    if conversation is None or conversation.user_id != caller_id:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Conversation not found")
+
     records = get_conversation_messages(db, conversation_id, limit=limit)
 
     messages = [

@@ -1,19 +1,20 @@
-import React from 'react'
+import React, { useState } from 'react'
 import { motion, AnimatePresence } from 'framer-motion'
+import { useNavigate } from 'react-router-dom'
 import {
   HomeIcon,
   PlaneIcon,
   BookmarkIcon,
   SettingsIcon,
-  SparklesIcon,
   MessageSquareIcon,
   MoreVerticalIcon,
+  LogOutIcon,
   XIcon,
 } from 'lucide-react'
 import voyaLogo from '../assets/voya-logo.jpg'
 import { navItems } from '../data/navigation'
-import { currentUser } from '../data/user'
 import { useAppStore } from '../hooks/useAppStore'
+import { useAuthStore } from '../hooks/useAuthStore'
 import type { Conversation, NavItem, RecentChat } from '../types'
 
 const CONVERSATION_TITLE_FALLBACK = 'New conversation'
@@ -73,6 +74,13 @@ function NavButton({ item }: { item: NavItem }) {
 function SidebarContent({ onClose }: { onClose?: () => void }) {
   const conversations = useAppStore((s) => s.conversations)
   const recentChats = toRecentChats(conversations)
+  const logout = useAuthStore((s) => s.logout)
+  const navigate = useNavigate()
+
+  const handleLogout = async () => {
+    await logout()
+    navigate('/login')
+  }
 
   return (
     <div className="grid h-full w-full grid-cols-1 grid-rows-[auto_auto_minmax(0,1fr)_auto] overflow-hidden bg-surface">
@@ -128,33 +136,72 @@ function SidebarContent({ onClose }: { onClose?: () => void }) {
 
       {/* Footer */}
       <div className="border-t border-line px-4 py-4">
-        <div className="flex items-center gap-3">
-          <img
-            src={currentUser.avatar}
-            alt=""
-            className="h-9 w-9 shrink-0 rounded-full object-cover"
-          />
-          <div className="min-w-0 flex-1">
-            <p className="truncate text-sm font-semibold text-ink">{currentUser.name}</p>
-            <p className="truncate text-xs text-faint">{currentUser.email}</p>
-          </div>
-          <button
-            type="button"
-            aria-label="Account options"
-            className="rounded-lg p-1.5 text-faint transition-colors duration-150 hover:bg-canvas hover:text-ink"
-          >
-            <MoreVerticalIcon className="h-4 w-4" />
-          </button>
-        </div>
+        <AccountMenu />
 
         <button
           type="button"
+          onClick={handleLogout}
           className="mt-3 flex w-full items-center justify-center gap-2 rounded-full border border-accent/40 bg-accent-soft px-4 py-2.5 text-sm font-semibold text-ink transition-colors duration-150 hover:bg-accent/15"
         >
-          <SparklesIcon className="h-4 w-4" strokeWidth={2.2} />
-          Upgrade to Pro
+          <LogOutIcon className="h-4 w-4" strokeWidth={2.2} />
+          Log out
         </button>
       </div>
+    </div>
+  )
+}
+
+function AccountMenu() {
+  const user = useAuthStore((s) => s.user)
+  const logout = useAuthStore((s) => s.logout)
+  const navigate = useNavigate()
+  const [open, setOpen] = useState(false)
+
+  const handleLogout = async () => {
+    setOpen(false)
+    await logout()
+    navigate('/login')
+  }
+
+  return (
+    <div className="relative flex items-center gap-3">
+      <span className="flex h-9 w-9 shrink-0 items-center justify-center rounded-full bg-accent-soft text-sm font-semibold text-ink">
+        {(user?.name ?? '?').charAt(0).toUpperCase()}
+      </span>
+      <div className="min-w-0 flex-1">
+        <p className="truncate text-sm font-semibold text-ink">{user?.name ?? 'Account'}</p>
+        <p className="truncate text-xs text-faint">{user?.email ?? ''}</p>
+      </div>
+      <button
+        type="button"
+        onClick={() => setOpen((v) => !v)}
+        aria-label="Account options"
+        aria-expanded={open}
+        className="rounded-lg p-1.5 text-faint transition-colors duration-150 hover:bg-canvas hover:text-ink"
+      >
+        <MoreVerticalIcon className="h-4 w-4" />
+      </button>
+
+      {open && (
+        <>
+          <button
+            type="button"
+            aria-label="Close account menu"
+            onClick={() => setOpen(false)}
+            className="fixed inset-0 z-10 cursor-default"
+          />
+          <div className="absolute bottom-full right-0 z-20 mb-2 w-40 overflow-hidden rounded-xl border border-line bg-surface shadow-lift">
+            <button
+              type="button"
+              onClick={handleLogout}
+              className="flex w-full items-center gap-2 px-3.5 py-2.5 text-left text-sm font-medium text-ink transition-colors duration-150 hover:bg-canvas"
+            >
+              <LogOutIcon className="h-4 w-4" strokeWidth={2} />
+              Log out
+            </button>
+          </div>
+        </>
+      )}
     </div>
   )
 }
