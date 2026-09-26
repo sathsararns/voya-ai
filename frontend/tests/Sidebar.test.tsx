@@ -7,9 +7,26 @@ import { MemoryRouter } from 'react-router-dom'
 import '@testing-library/jest-dom/vitest'
 import { Sidebar } from '../src/components/Sidebar'
 import { useAppStore } from '../src/hooks/useAppStore'
+import { useAuthStore } from '../src/hooks/useAuthStore'
+import type { AuthUser } from '../src/types/auth'
 
 function jsonResponse(body: unknown, ok = true) {
   return { ok, status: ok ? 200 : 500, json: async () => body }
+}
+
+// send() now streams its chat reply over SSE (see src/lib/api.ts's
+// streamPost) instead of a single JSON body — this builds a
+// fetch-mock-compatible streamed response carrying just a terminal `done`
+// event, which is all these tests need (see tests/useAppStore.test.ts for
+// tests that also exercise live token events).
+function sseDone(data: unknown) {
+  const body = new ReadableStream<Uint8Array>({
+    start(controller) {
+      controller.enqueue(new TextEncoder().encode(`event: done\ndata: ${JSON.stringify(data)}\n\n`))
+      controller.close()
+    },
+  })
+  return { ok: true, status: 200, body }
 }
 
 // Sidebar's account menu uses useNavigate() (for the post-logout redirect),
@@ -23,6 +40,14 @@ function renderSidebar() {
 }
 
 const initialState = useAppStore.getState()
+const initialAuthState = useAuthStore.getState()
+
+const defaultUser: AuthUser = {
+  id: 'default-user',
+  name: 'Test User',
+  email: 'test@example.com',
+  created_at: '2026-01-01T00:00:00Z',
+}
 
 const conversations = [
   {
@@ -43,6 +68,7 @@ const conversations = [
 
 beforeEach(() => {
   useAppStore.setState(initialState, true)
+  useAuthStore.setState(initialAuthState, true)
 })
 
 afterEach(() => {
@@ -96,6 +122,21 @@ describe('Sidebar reflects a sent chat immediately — real store, real render, 
   // Sidebar component, subscribed to the real useAppStore, driven by the
   // real send() action (only fetch is mocked) — not just asserting on
   // store state in isolation (see tests/useAppStore.test.ts for that).
+  //
+  // send() only runs from the real composer, reachable only once
+  // ProtectedRoute considers the caller authenticated — set that up here.
+  // Setting useAuthStore's user fires its cross-store subscription (see
+  // useAuthStore.ts), which kicks off its own fire-and-forget
+  // initConversations() call; flushing that with a safe default mock
+  // before each test installs its own fetch mocks keeps it from racing
+  // with (and overwriting the render this test asserts on via) the test's
+  // own send() call.
+  beforeEach(async () => {
+    global.fetch = vi.fn().mockResolvedValue(jsonResponse({ conversations: [] })) as unknown as typeof fetch
+    useAuthStore.setState({ ...initialAuthState, user: defaultUser, status: 'authenticated' }, true)
+    await new Promise((resolve) => setTimeout(resolve, 0))
+  })
+
   it('a brand-new conversation appears in the rendered sidebar right after send() resolves', async () => {
     useAppStore.setState({ conversations: [] })
     renderSidebar()
@@ -105,7 +146,7 @@ describe('Sidebar reflects a sent chat immediately — real store, real render, 
     global.fetch = vi
       .fn()
       .mockResolvedValueOnce(
-        jsonResponse({ summary: 'A plan', itinerary: [], conversation_id: 'new-conv-1', kb_sources: [] }),
+        sseDone({ summary: 'A plan', itinerary: [], conversation_id: 'new-conv-1', kb_sources: [] }),
       )
       .mockResolvedValueOnce(
         jsonResponse({
@@ -144,7 +185,7 @@ describe('Sidebar reflects a sent chat immediately — real store, real render, 
     global.fetch = vi
       .fn()
       .mockResolvedValueOnce(
-        jsonResponse({ summary: 'Updated plan', itinerary: [], conversation_id: 'existing-conv', kb_sources: [] }),
+        sseDone({ summary: 'Updated plan', itinerary: [], conversation_id: 'existing-conv', kb_sources: [] }),
       )
       .mockResolvedValueOnce(
         jsonResponse({ conversations: [{ ...existing, updated_at: '2026-01-01T00:05:00Z' }] }),

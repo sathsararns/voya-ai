@@ -110,31 +110,63 @@ def get_current_user(request: Request, db: Session = Depends(get_db)) -> User:
 
 
 def get_current_user_optional(request: Request, db: Session = Depends(get_db)) -> Optional[User]:
-    """Same resolution as get_current_user, but returns None instead of
-    raising when there's no valid session, rather than rejecting the
-    request outright. Used by routes/chat.py, which serves both logged-in
-    callers (whose conversations get scoped to their account) and anonymous
-    callers (e.g. a direct API call with no session cookie, or this
-    project's own integration tests) — the chat endpoints must keep working
-    for both, so they can't use get_current_user's hard 401.
+    """Same resolution as get_current_user, but distinguishes "no session
+    was ever presented" from "a session was presented (or expected) and
+    it's broken" — only the first case returns None. Used by routes/chat.py,
+    which serves both logged-in callers (whose conversations get scoped to
+    their account) and genuinely anonymous callers (e.g. a direct API call
+    with no session cookie at all, or this project's own integration tests).
+
+    Returning None for an INVALID-but-present cookie (expired, tampered,
+    revoked by logout, or invalidated by a password change) used to be the
+    bug here: the frontend only ever shows the chat composer once
+    ProtectedRoute considers the caller authenticated, so a message sent
+    through it always comes from someone who believes they have a session.
+    If that session had quietly gone stale (a JWT that finally expired, a
+    logout in another tab, a password reset), falling back to "anonymous"
+    meant their message still "sent successfully" but silently saved with
+    user_id NULL — permanently invisible in their own Recent Chats, with no
+    error to explain why. A present-but-broken session must be rejected
+    (401) so the caller finds out and can log in again, exactly like
+    get_current_user does for routes that require auth outright.
+
+    The X-Client-Expects-Auth header (see frontend/src/hooks/useAppStore.ts's
+    authExpectationHeaders) closes the one gap that fix alone couldn't: the
+    frontend's belief that it's logged in is in-memory state, set once at
+    login and never re-verified against the actual browser cookie before
+    every request. If that httpOnly cookie is ever silently gone by the
+    time a request goes out — for any reason, including ones neither side
+    can directly observe — the request arrives with no cookie at all,
+    which is otherwise indistinguishable from a genuine anonymous caller.
+    The header is the frontend explicitly saying "I expect a session on
+    this request regardless of what actually arrived" — so a missing
+    cookie WITH this header present is treated as a broken session, not a
+    legitimate anonymous one. A real anonymous caller (direct API access,
+    this project's own tests) never sends it, so that path is unaffected.
     """
+    session_error = HTTPException(
+        status_code=status.HTTP_401_UNAUTHORIZED, detail="Session expired, please log in again"
+    )
+
     token = request.cookies.get(ACCESS_TOKEN_COOKIE_NAME)
     if not token:
-        return None
+        if request.headers.get("x-client-expects-auth"):
+            raise session_error
+        return None  # no session was ever presented — genuinely anonymous
 
     try:
         payload = decode_access_token(token, redis_client)
     except TokenError:
-        return None
+        raise session_error
 
     user = get_user_by_id(db, payload["sub"])
     if not user or not user.is_active:
-        return None
+        raise session_error
 
     issued_pwd_changed_at = payload.get("pwd_changed_at", 0)
     current_pwd_changed_at = int(user.password_changed_at.replace(tzinfo=timezone.utc).timestamp())
     if issued_pwd_changed_at != current_pwd_changed_at:
-        return None
+        raise session_error
 
     return user
 

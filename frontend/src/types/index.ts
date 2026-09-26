@@ -31,6 +31,19 @@ export interface Message {
   content: string
   createdAt: number
   pending?: boolean
+  // True while an assistant message's text is still arriving token-by-token
+  // (see useAppStore.ts's send() and lib/api.ts's streamPost) — distinct
+  // from `pending`, which covers the earlier window before the first token
+  // has arrived at all. Never true at the same time as `plan` being set:
+  // `plan` only appears once the full reply (and therefore streaming) is done.
+  streaming?: boolean
+  // Set once, permanently, when the user clicked Stop mid-generation (see
+  // useAppStore.ts's stopGenerating/send()). `content` is left exactly as
+  // it was at that moment — whatever text had already streamed in, or none
+  // at all — and `plan` never gets set for this message, since the reply
+  // was never completed or saved. ChatThread.tsx uses this only to show a
+  // small "Generation stopped" label alongside that leftover content.
+  stopped?: boolean
   plan?: ChatResponse
 }
 

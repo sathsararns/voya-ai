@@ -206,3 +206,96 @@ def normalize_chat_response(raw_text: str) -> Dict[str, Any]:
         }
     )
     return data
+
+
+_JSON_ESCAPES = {
+    "n": "\n", "t": "\t", "r": "\r", '"': '"', "\\": "\\", "/": "/", "b": "\b", "f": "\f",
+}
+
+
+class SummaryStreamExtractor:
+    """Incrementally decodes the `"summary"` string value out of a stream of
+    raw JSON text fragments, as they arrive — before the JSON object as a
+    whole is complete or even valid.
+
+    The model (see services/groq_service.py) is prompted to return one JSON
+    object matching the ChatResponse schema, so there is no plain-text
+    reply to stream directly. `summary` is the one field that's actually
+    shown to the user as conversational text, so this is a small state
+    machine that watches the raw token stream for the literal `"summary"`
+    key, then decodes characters of its string value one at a time
+    (handling standard JSON escapes, including a \\uXXXX split across
+    multiple feed() calls) until the closing quote — completely ignoring
+    everything else in the JSON object (destination, itinerary, etc.),
+    which is only ever needed once the full object is complete anyway.
+
+    Feed raw fragments in arrival order via feed(); each call returns the
+    newly-decoded substring available so far (often empty). Not reusable
+    across two responses — construct a fresh instance per stream.
+    """
+
+    _KEY = '"summary"'
+
+    def __init__(self) -> None:
+        self._state = "seeking_key"
+        self._key_tail = ""
+        self._escape = False
+        self._unicode_buffer = ""
+
+    def feed(self, chunk: str) -> str:
+        output: List[str] = []
+
+        for ch in chunk:
+            if self._state == "done":
+                break
+
+            if self._state == "seeking_key":
+                self._key_tail = (self._key_tail + ch)[-len(self._KEY) :]
+                if self._key_tail == self._KEY:
+                    self._state = "seeking_colon"
+                continue
+
+            if self._state == "seeking_colon":
+                if ch == ":":
+                    self._state = "seeking_quote"
+                continue
+
+            if self._state == "seeking_quote":
+                if ch == '"':
+                    self._state = "in_string"
+                elif not ch.isspace():
+                    # Malformed/unexpected shape — give up rather than
+                    # decode garbage.
+                    self._state = "done"
+                continue
+
+            if self._state == "unicode_escape":
+                self._unicode_buffer += ch
+                if len(self._unicode_buffer) == 4:
+                    try:
+                        output.append(chr(int(self._unicode_buffer, 16)))
+                    except ValueError:
+                        pass
+                    self._unicode_buffer = ""
+                    self._escape = False
+                    self._state = "in_string"
+                continue
+
+            # self._state == "in_string"
+            if self._escape:
+                if ch == "u":
+                    self._state = "unicode_escape"
+                    self._unicode_buffer = ""
+                else:
+                    output.append(_JSON_ESCAPES.get(ch, ch))
+                    self._escape = False
+                continue
+            if ch == "\\":
+                self._escape = True
+                continue
+            if ch == '"':
+                self._state = "done"
+                continue
+            output.append(ch)
+
+        return "".join(output)

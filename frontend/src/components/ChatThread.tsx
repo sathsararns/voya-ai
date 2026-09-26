@@ -60,7 +60,24 @@ export function ChatThread() {
               ) : message.plan ? (
                 <ItineraryCard plan={message.plan} fallback={message.content} />
               ) : (
-                <p className="whitespace-pre-wrap text-[15px] leading-6 text-ink">{message.content}</p>
+                <>
+                  {message.content && (
+                    <p className="whitespace-pre-wrap text-[15px] leading-6 text-ink">
+                      {message.content}
+                      {message.streaming && (
+                        <span
+                          aria-hidden="true"
+                          className="ml-0.5 inline-block h-3.75 w-0.5 translate-y-0.5 animate-pulse bg-ink/50"
+                        />
+                      )}
+                    </p>
+                  )}
+                  {message.stopped && (
+                    <p className={`text-[13px] italic text-faint ${message.content ? 'mt-1.5' : ''}`}>
+                      Generation stopped
+                    </p>
+                  )}
+                </>
               )}
             </div>
           </motion.div>

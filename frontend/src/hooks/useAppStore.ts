@@ -1,5 +1,6 @@
 import { create } from 'zustand'
-import { api } from '../lib/api'
+import { api, ApiAbortError, ApiNetworkError, ApiRequestError, streamPost } from '../lib/api'
+import { useAuthStore } from './useAuthStore'
 import type {
   ChatHistoryResponse,
   ChatResponse,
@@ -27,6 +28,7 @@ interface AppState {
   setActiveNav: (id: string) => void
   newChat: () => void
   send: (content: string) => Promise<void>
+  stopGenerating: () => void
   initConversations: () => Promise<void>
   selectConversation: (conversationId: string) => Promise<void>
   refreshConversations: () => Promise<void>
@@ -35,6 +37,22 @@ interface AppState {
 
 const SESSION_STORAGE_KEY = 'voya_session_id'
 let cachedSessionId: string | null = null
+
+// Typewriter reveal speed for a streaming assistant message — tune these
+// two together to make the effect faster/slower without touching the
+// reveal logic itself (see send()'s revealTick). Exported so tests can
+// advance fake timers by an exact multiple of the real interval instead of
+// guessing at one.
+export const TYPEWRITER_INTERVAL_MS = 16
+export const TYPEWRITER_CHARS_PER_TICK = 2
+
+// The in-flight send()'s AbortController, if any — module-level rather than
+// store state because it's plumbing for cancellation, not UI-facing data
+// (mirrors cachedSessionId's own reasoning above). send() guards against a
+// second concurrent call (`if (get().isResponding) return`), so there is
+// only ever at most one of these active at a time; stopGenerating() just
+// aborts whichever one that is.
+let activeAbortController: AbortController | null = null
 
 function createId(): string {
   if (typeof crypto !== 'undefined' && 'randomUUID' in crypto) {
@@ -85,6 +103,27 @@ function getOrCreateSessionId(): string {
   return id
 }
 
+// Sent on every request this store makes while useAuthStore believes a
+// user is logged in — a signal the backend cannot otherwise derive, and
+// the missing piece that let an authenticated send still land as
+// anonymous: useAuthStore.getState().user is in-memory belief, set once at
+// login and not re-verified against the actual browser cookie before every
+// call. If that httpOnly cookie is ever silently gone by the time a
+// request actually goes out — expired without any 401 ever having fired
+// to correct the local belief, cleared by devtools or an extension,
+// anything — the request would otherwise arrive with no cookie at all,
+// which is indistinguishable at the backend from a genuine anonymous
+// caller (see routes/auth.py's get_current_user_optional, which must keep
+// that path working for this project's real anonymous/API traffic). This
+// header tells it "this specific request expects a session regardless" —
+// so a present header with no cookie is treated as a broken session (401),
+// never silently downgraded to anonymous. A genuine anonymous caller
+// (direct API access, this project's own integration tests) never sends
+// it, so that path is completely unaffected.
+function authExpectationHeaders(): Record<string, string> | undefined {
+  return useAuthStore.getState().user ? { 'X-Client-Expects-Auth': '1' } : undefined
+}
+
 async function apiListConversations(): Promise<Conversation[]> {
   // No session_id in this request, deliberately — this call only ever
   // happens for an authenticated caller (see initConversations/
@@ -96,12 +135,18 @@ async function apiListConversations(): Promise<Conversation[]> {
   // once a caller is authenticated. Sending it here would be inert at
   // best; omitting it entirely is what makes that guarantee visible and
   // unambiguous at the call site, not just at the backend.
-  const data = await api.get<ConversationListResponse>('/api/v1/chat/conversations')
+  const data = await api.get<ConversationListResponse>(
+    '/api/v1/chat/conversations',
+    authExpectationHeaders(),
+  )
   return data.conversations
 }
 
 async function apiGetConversationMessages(conversationId: string): Promise<ChatHistoryResponse> {
-  return api.get<ChatHistoryResponse>(`/api/v1/chat/conversations/${conversationId}/messages`)
+  return api.get<ChatHistoryResponse>(
+    `/api/v1/chat/conversations/${conversationId}/messages`,
+    authExpectationHeaders(),
+  )
 }
 
 // Mirrors backend/routes/chat.py's CONVERSATION_TITLE_MAX_LENGTH /
@@ -345,9 +390,85 @@ export const useAppStore = create<AppState>((set, get) => ({
     const text = content.trim()
     if (!text || get().isResponding) return
 
+    // The composer is only ever reachable once ProtectedRoute considers the
+    // caller authenticated (see components/auth/ProtectedRoute.tsx) — if
+    // useAuthStore's own record of who's logged in is already gone by the
+    // moment of sending (a cross-tab logout, a session this tab already
+    // detected as expired), refuse to submit as if this were a legitimate
+    // authenticated message. The backend's get_current_user_optional (see
+    // routes/auth.py) correctly rejects a present-but-broken cookie with
+    // 401 — but a request that carries NO cookie at all is, by design,
+    // indistinguishable there from a genuine anonymous caller (this
+    // project's own real anonymous/API path still needs that to work).
+    // That distinction can only be made here, before the request ever
+    // leaves this tab.
+    if (!useAuthStore.getState().user) {
+      set((state) => ({
+        messages: [
+          ...state.messages,
+          {
+            id: `a-${Date.now()}`,
+            role: 'assistant',
+            content: 'Your session has ended. Please log in again to keep chatting.',
+            createdAt: Date.now(),
+          },
+        ],
+      }))
+      return
+    }
+
     const stamp = Date.now()
     const sessionId = getOrCreateSessionId()
     let conversationId = get().activeConversationId
+
+    const controller = new AbortController()
+    activeAbortController = controller
+
+    // Typewriter reveal state for this send() call — declared here (not
+    // inside the try block below) so the catch block can also reach
+    // stopTypewriter()/targetText when the stream is aborted or fails, to
+    // stop the ticker and settle on the right final text either way. See
+    // TYPEWRITER_INTERVAL_MS/TYPEWRITER_CHARS_PER_TICK for the actual speed.
+    // `targetText` is the raw, fully-arrived text (exactly what the old
+    // direct-set behavior used to show immediately); revealTick is what
+    // actually grows the bubble's visible `content`, a fixed few characters
+    // at a time on a fixed interval, independent of however bursty Groq's
+    // own network chunking happens to be. The terminal `done` event still
+    // carries the exact same authoritative payload POST /api/v1/chat/ used
+    // to return directly, and immediately snaps `content` to it (stopping
+    // the ticker) — the typewriter only ever governs how the IN-PROGRESS
+    // text is displayed, never what ultimately gets shown or saved.
+    let targetText = ''
+    let revealedLength = 0
+    let typewriterTimer: ReturnType<typeof setInterval> | null = null
+
+    const stopTypewriter = () => {
+      if (typewriterTimer !== null) {
+        clearInterval(typewriterTimer)
+        typewriterTimer = null
+      }
+    }
+
+    const revealTick = () => {
+      if (revealedLength >= targetText.length) {
+        // Caught up with everything that has arrived so far — pause rather
+        // than spin; onToken restarts this the next time more text comes in.
+        stopTypewriter()
+        return
+      }
+      revealedLength = Math.min(targetText.length, revealedLength + TYPEWRITER_CHARS_PER_TICK)
+      const visibleText = targetText.slice(0, revealedLength)
+      set((state) => ({
+        messages: state.messages.map((m) =>
+          // Only ever flips pending -> false on the FIRST tick that
+          // actually has something to show — this is what keeps TypingDots
+          // visible for the brief instant between "a token event arrived"
+          // and "the typewriter has revealed its first character", instead
+          // of a blank frame in between.
+          m.id === `a-${stamp}` ? { ...m, pending: false, streaming: true, content: visibleText } : m,
+        ),
+      }))
+    }
 
     set((state) => ({
       isResponding: true,
@@ -360,36 +481,83 @@ export const useAppStore = create<AppState>((set, get) => ({
     }))
 
     try {
-      // credentials are sent by `api` — when logged in, this conversation
-      // is created/continued under the caller's account (see
-      // routes/chat.py), not just this browser's session_id.
-      const data = await api.post<ChatResponse>('/api/v1/chat/', {
-        message: text,
-        session_id: sessionId,
-        conversation_id: conversationId,
-      })
-      const assistantText = formatAssistantReply(data)
+      // credentials are sent by streamPost (see lib/api.ts) — when logged
+      // in, this conversation is created/continued under the caller's
+      // account (see routes/chat.py's chat_stream), not just this
+      // browser's session_id. The extra header (see
+      // authExpectationHeaders' own comment) is what makes a
+      // silently-vanished cookie fail loudly instead of quietly landing as
+      // an anonymous, unowned conversation.
+      await streamPost(
+        '/api/v1/chat/stream',
+        {
+          message: text,
+          session_id: sessionId,
+          conversation_id: conversationId,
+        },
+        {
+          onToken: (chunk) => {
+            targetText += chunk
+            if (typewriterTimer === null) {
+              typewriterTimer = setInterval(revealTick, TYPEWRITER_INTERVAL_MS)
+            }
+          },
+          onDone: (rawData) => {
+            const data = rawData as ChatResponse
+            const assistantText = formatAssistantReply(data)
 
-      // Covers the rare case where no conversation existed yet and the
-      // backend created one on the fly.
-      if (data.conversation_id && data.conversation_id !== conversationId) {
-        conversationId = data.conversation_id
-        set({ activeConversationId: conversationId })
+            // The reply is complete — show it in full immediately rather
+            // than let the typewriter keep catching up on its own schedule
+            // (it may also differ from `targetText` if a validation retry
+            // corrected the summary server-side; `done` is always
+            // authoritative over whatever was mid-reveal).
+            stopTypewriter()
+
+            // Covers the rare case where no conversation existed yet and
+            // the backend created one on the fly.
+            if (data.conversation_id && data.conversation_id !== conversationId) {
+              conversationId = data.conversation_id
+              set({ activeConversationId: conversationId })
+            }
+
+            set((state) => ({
+              isResponding: false,
+              messages: state.messages.map((m) =>
+                m.id === `a-${stamp}`
+                  ? { ...m, pending: false, streaming: false, content: assistantText, plan: data }
+                  : m,
+              ),
+              // Insert/bump Recent Chats immediately, from data already in
+              // hand — this is the actual guarantee that a sent chat appears,
+              // not the network refresh below. See
+              // upsertConversationOptimistically's own comment for why.
+              conversations: conversationId
+                ? upsertConversationOptimistically(state.conversations, conversationId, sessionId, text)
+                : state.conversations,
+            }))
+          },
+        },
+        { headers: authExpectationHeaders(), signal: controller.signal },
+      )
+
+      // Defensive only: streamPost throws on a reported `error` event or a
+      // non-2xx/network failure (caught below, same as before), and the
+      // backend's chat_stream always sends a terminal `done`. The one gap
+      // neither of those covers is a connection that just ends without
+      // either — this stops the composer from being stuck "responding"
+      // forever if that ever happens, instead of only reacting to failures
+      // the stream actually reported.
+      if (get().isResponding) {
+        stopTypewriter()
+        set((state) => ({
+          isResponding: false,
+          messages: state.messages.map((m) =>
+            m.id === `a-${stamp}`
+              ? { ...m, pending: false, streaming: false, content: 'Please try again' }
+              : m,
+          ),
+        }))
       }
-
-      set((state) => ({
-        isResponding: false,
-        messages: state.messages.map((m) =>
-          m.id === `a-${stamp}` ? { ...m, pending: false, content: assistantText, plan: data } : m,
-        ),
-        // Insert/bump Recent Chats immediately, from data already in
-        // hand — this is the actual guarantee that a sent chat appears,
-        // not the network refresh below. See
-        // upsertConversationOptimistically's own comment for why.
-        conversations: conversationId
-          ? upsertConversationOptimistically(state.conversations, conversationId, sessionId, text)
-          : state.conversations,
-      }))
 
       // Reconciles with the server's exact state afterward (the real
       // title text vs. this file's mirrored truncation, the precise
@@ -413,15 +581,88 @@ export const useAppStore = create<AppState>((set, get) => ({
           conversations: upsertConversationOptimistically(state.conversations, conversationId!, sessionId, text),
         }))
       }
-    } catch {
+    } catch (error) {
+      // Stops the reveal ticker unconditionally, on every failure branch
+      // below — without this, a tick already scheduled before the failure
+      // could fire afterward and overwrite whatever this catch block is
+      // about to set `content` to with a stale, partially-revealed value.
+      stopTypewriter()
+
+      if (error instanceof ApiAbortError) {
+        // The user clicked Stop (see stopGenerating below) — not a
+        // failure, so it gets its own outcome instead of an error message.
+        // Flushes `content` to `targetText` (everything that had actually
+        // arrived over the network) rather than freezing at whatever the
+        // typewriter had visually revealed so far — the same "keep
+        // whatever was already streamed" guarantee as before the typewriter
+        // effect existed, just now needing to say so explicitly: revealing
+        // is deliberately slower than arrival, but stopping shouldn't
+        // discard text that already arrived just because the animation
+        // hadn't caught up to it yet. `stopped` just lets ChatThread.tsx add
+        // a small, explicit "Generation stopped" label alongside whatever is
+        // there (including nothing, if it was stopped before the first
+        // token).
+        set((state) => ({
+          isResponding: false,
+          messages: state.messages.map((m) =>
+            m.id === `a-${stamp}` ? { ...m, pending: false, streaming: false, content: targetText, stopped: true } : m,
+          ),
+        }))
+        return
+      }
+
+      // Surface the backend's actual reason when there is one (e.g. "Session
+      // expired, please log in again" — see routes/auth.py's
+      // get_current_user_optional) instead of a generic message that would
+      // hide exactly the kind of failure that used to silently orphan a
+      // message as anonymous instead of erroring at all. A network-level
+      // failure (fetch never got a response, or the connection dropped
+      // mid-stream) has no such backend detail to show, so it gets its own
+      // plain-language message instead of ApiNetworkError's own
+      // developer-facing troubleshooting text.
+      const errorMessage =
+        error instanceof ApiNetworkError
+          ? 'Connection lost'
+          : error instanceof ApiRequestError
+            ? error.message
+            : 'Please try again'
+
       set((state) => ({
         isResponding: false,
         messages: state.messages.map((m) =>
-          m.id === `a-${stamp}`
-            ? { ...m, pending: false, content: 'Something went wrong. Please try again.' }
-            : m,
+          m.id === `a-${stamp}` ? { ...m, pending: false, streaming: false, content: errorMessage } : m,
         ),
       }))
+
+      // A 401 here specifically means the session was believed valid (the
+      // composer is only ever reachable once ProtectedRoute considers the
+      // caller authenticated) but the backend rejected it. Re-syncing auth
+      // state now — rather than leaving `status` stuck on a now-false
+      // 'authenticated' — is what makes ProtectedRoute correctly show the
+      // logged-out welcome state instead of a composer that will keep
+      // failing the same way on every next message.
+      if (error instanceof ApiRequestError && error.status === 401) {
+        useAuthStore.getState().fetchCurrentUser()
+      }
+    } finally {
+      // Only clear it if it's still this call's controller — irrelevant in
+      // practice (send() refuses a second concurrent call while
+      // isResponding is true) but keeps this from ever clobbering a
+      // different, newer controller.
+      if (activeAbortController === controller) {
+        activeAbortController = null
+      }
     }
+  },
+
+  // Cancels the in-flight send(), if any (see the Composer's Stop button).
+  // Aborting the fetch is the entire mechanism — send()'s own try/catch
+  // (see the ApiAbortError branch above) is what actually turns that into
+  // clean UI state, so this action has nothing else to do. A stray call
+  // with nothing in flight (e.g. a double-click racing the request's own
+  // natural completion) is a harmless no-op: AbortController#abort() on an
+  // already-settled controller does nothing.
+  stopGenerating: () => {
+    activeAbortController?.abort()
   },
 }))

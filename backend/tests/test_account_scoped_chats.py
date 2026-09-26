@@ -50,6 +50,106 @@ def _list_conversations(client: TestClient, session_id: str) -> list:
     return response.json()["conversations"]
 
 
+class TestChatOwnershipNeverSilentlyAnonymous:
+    """Root-caused via direct database inspection: many conversations with
+    user_id NULL, some clearly from a real authenticated browser session
+    (not this project's own anonymous test traffic). The cause was
+    get_current_user_optional (see routes/auth.py) treating "a session
+    cookie is present but invalid" the same as "no session cookie at all"
+    — silently falling back to anonymous instead of rejecting the request.
+    Since the frontend only ever shows the chat composer once
+    ProtectedRoute considers the caller authenticated, a message sent
+    through it always comes from someone who believes they have a session
+    — so a stale one must error, never quietly own the conversation as
+    NULL.
+    """
+
+    def test_authenticated_send_always_sets_a_real_user_id_never_null(self):
+        client = TestClient(app)
+        signup = _signup(client, "Tom")
+        user_id = signup["id"]
+
+        reply = client.post("/api/v1/chat/", json={"message": "Tom's trip"})
+        conversation_id = reply.json()["conversation_id"]
+
+        from db.models import Conversation
+        from db.session import SessionLocal
+
+        db = SessionLocal()
+        try:
+            conversation = (
+                db.query(Conversation).filter(Conversation.conversation_id == conversation_id).first()
+            )
+            assert conversation is not None
+            assert conversation.user_id is not None
+            assert conversation.user_id == user_id
+        finally:
+            db.close()
+
+    def test_chat_send_with_a_revoked_session_cookie_is_rejected_not_silently_anonymous(self):
+        client = TestClient(app)
+        _signup(client, "Tom")
+
+        # Capture the still-valid access token before revoking it, to
+        # simulate a second tab (or this same one) that still holds it
+        # after the session it belongs to has been logged out elsewhere.
+        stale_token = client.cookies.get("voya_access_token")
+        assert stale_token
+
+        csrf_token = client.cookies.get("voya_csrf_token")
+        logout_response = client.post("/api/v1/auth/logout", headers={"x-csrf-token": csrf_token})
+        assert logout_response.status_code == 200
+
+        # Re-present the now-revoked cookie explicitly (the client's own
+        # jar no longer has it — logout cleared it there).
+        client.cookies.set("voya_access_token", stale_token)
+        response = client.post(
+            "/api/v1/chat/", json={"message": "This must not become an anonymous conversation"}
+        )
+        assert response.status_code == 401
+
+    def test_chat_send_with_genuinely_no_cookie_at_all_still_works_anonymously(self):
+        """The fix narrows "silently anonymous" down to exactly the one
+        case that should still work that way: no session was ever
+        presented in the first place. Confirms the distinction is real,
+        not just "authenticated senders now always error".
+        """
+        anon_client = TestClient(app)
+        response = anon_client.post("/api/v1/chat/", json={"message": "Anonymous message"})
+        assert response.status_code == 200
+
+    def test_a_silently_vanished_cookie_with_the_expects_auth_header_is_rejected_not_anonymous(self):
+        """The gap neither the cookie-based fix above nor the frontend's
+        own useAuthStore.user check alone can close: the frontend believes
+        it's logged in (in-memory state, set once at login) but the actual
+        browser cookie is gone by the time a request goes out, for a
+        reason neither side can directly observe. That request arrives
+        with literally no cookie — identical, at the backend, to a genuine
+        anonymous caller. X-Client-Expects-Auth (see
+        frontend/src/hooks/useAppStore.ts's authExpectationHeaders) is the
+        frontend explicitly flagging "this request expects a session
+        regardless of what arrived", so this case is now rejected instead
+        of silently creating a NULL-owned conversation.
+        """
+        anon_client = TestClient(app)  # no cookie at all, by construction
+        response = anon_client.post(
+            "/api/v1/chat/",
+            json={"message": "This must not become an anonymous conversation"},
+            headers={"X-Client-Expects-Auth": "1"},
+        )
+        assert response.status_code == 401
+
+    def test_the_expects_auth_header_never_affects_a_genuinely_anonymous_caller_that_omits_it(self):
+        """The other half of the same guarantee: a real anonymous caller
+        (this project's own tests included) never sends the header, and
+        must keep working exactly as before — this isn't a blanket "no
+        cookie always errors now".
+        """
+        anon_client = TestClient(app)
+        response = anon_client.post("/api/v1/chat/", json={"message": "Genuinely anonymous message"})
+        assert response.status_code == 200
+
+
 class TestRecentChatsUpdateAfterSend:
     """Flow reported broken: chat sends succeed, but the conversation
     doesn't show up in (or update within) Recent Chats. These prove the
