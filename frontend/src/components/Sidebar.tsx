@@ -1,6 +1,6 @@
 import React, { useState } from 'react'
 import { motion, AnimatePresence } from 'framer-motion'
-import { useNavigate } from 'react-router-dom'
+import { useLocation, useNavigate } from 'react-router-dom'
 import {
   HomeIcon,
   PlaneIcon,
@@ -37,14 +37,31 @@ const icons: Record<NavItem['icon'], React.ElementType> = {
 function NavButton({ item }: { item: NavItem }) {
   const activeNav = useAppStore((s) => s.activeNav)
   const setActiveNav = useAppStore((s) => s.setActiveNav)
+  const navigate = useNavigate()
+  const location = useLocation()
   const Icon = icons[item.icon]
-  const active = activeNav === item.id
+
+  // "Settings" is the one nav item with a real route (see App.tsx's
+  // ChatApp, which now nests /settings alongside the default Home view) —
+  // Home/Trips/Saved stay exactly as before, purely cosmetic tab-switching
+  // via activeNav with no route of their own. While actually on /settings,
+  // it's the only item that should ever show active, regardless of
+  // whatever activeNav was last set to (e.g. after a browser back/forward
+  // landing here directly) — everywhere else, activeNav alone still decides
+  // it, unchanged from before this page existed.
+  const onSettingsRoute = location.pathname === '/settings'
+  const active = onSettingsRoute ? item.id === 'settings' : activeNav === item.id
+
+  const handleClick = () => {
+    setActiveNav(item.id)
+    navigate(item.id === 'settings' ? '/settings' : '/')
+  }
 
   return (
     <li>
       <button
         type="button"
-        onClick={() => setActiveNav(item.id)}
+        onClick={handleClick}
         aria-current={active ? 'page' : undefined}
         className={`relative flex w-full items-center gap-3 rounded-xl px-3 py-2.5 text-[14px] transition-colors duration-150 ${
           active

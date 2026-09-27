@@ -3,7 +3,14 @@
 // rendering, no server — so they stay fast and reliable while still
 // exercising the real state-transition logic in useAppStore.ts.
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import { TYPEWRITER_CHARS_PER_TICK, TYPEWRITER_INTERVAL_MS, useAppStore } from '../src/hooks/useAppStore'
+import {
+  TYPEWRITER_CHARS_PER_TICK,
+  TYPEWRITER_COMMA_PAUSE_MS,
+  TYPEWRITER_INTERVAL_MS,
+  TYPEWRITER_SENTENCE_PAUSE_MS,
+  TYPEWRITER_WORD_PAUSE_MS,
+  useAppStore,
+} from '../src/hooks/useAppStore'
 import { useAuthStore } from '../src/hooks/useAuthStore'
 import type { AuthUser } from '../src/types/auth'
 
@@ -523,7 +530,23 @@ describe('send — streaming: the assistant bubble fills in token-by-token', () 
       expect(assistantMessage?.plan).toBeUndefined()
 
       releaseStream()
+      // send() now only resolves once the typewriter has actually finished
+      // revealing the (possibly server-corrected) final text and
+      // finalizeMessage has run — it no longer snaps to full text the
+      // instant `done` arrives (that snap was the very "jump" bug this
+      // suite of changes fixes). Under fake timers that means real ticks
+      // still have to be advanced before awaiting completion, or the await
+      // below would hang forever waiting on a timer nothing ever advances.
+      const finalSummary = 'Hello there.'
+      const remainingChars = finalSummary.length - TYPEWRITER_CHARS_PER_TICK
+      const worstCaseMsPerChunk = TYPEWRITER_INTERVAL_MS + TYPEWRITER_SENTENCE_PAUSE_MS
+      await vi.advanceTimersByTimeAsync(
+        Math.ceil(remainingChars / TYPEWRITER_CHARS_PER_TICK) * worstCaseMsPerChunk + 500,
+      )
       await sendPromise
+
+      assistantMessage = useAppStore.getState().messages.find((m) => m.role === 'assistant')
+      expect(assistantMessage?.plan?.conversation_id).toBe('new-conv-1')
     } finally {
       vi.useRealTimers()
     }
@@ -727,31 +750,142 @@ describe('typewriter reveal — streamed text builds up character-by-character',
     const sendPromise = useAppStore.getState().send('Plan a trip to Kandy')
     await vi.advanceTimersByTimeAsync(0) // deliver the token event, schedule the ticker
 
+    // Doesn't assert an exact character position at an exact elapsed time —
+    // the cinematic reveal now pauses longer after punctuation/word
+    // boundaries than after a plain letter (see extraPauseForChunk in
+    // useAppStore.ts), so exactly how far along it is at a given timestamp
+    // depends on what's been revealed so far, not just tick count. What
+    // still has to hold regardless of pacing: genuinely partial first,
+    // then further along, then eventually the complete text — a real
+    // gradual reveal, not an instant jump.
     await vi.advanceTimersByTimeAsync(TYPEWRITER_INTERVAL_MS * 3)
-    const afterThreeTicks = useAppStore.getState().messages.find((m) => m.role === 'assistant')
-    const expectedAfterThree = fullText.slice(0, Math.min(fullText.length, TYPEWRITER_CHARS_PER_TICK * 3))
-    expect(afterThreeTicks?.content).toBe(expectedAfterThree)
-    // The actual point of this test: genuinely partial, not the whole
-    // string already — if this ever failed, the test would no longer be
-    // proving a gradual reveal at all.
-    expect(afterThreeTicks!.content.length).toBeLessThan(fullText.length)
+    const afterSome = useAppStore.getState().messages.find((m) => m.role === 'assistant')
+    expect(afterSome!.content.length).toBeGreaterThan(0)
+    expect(afterSome!.content.length).toBeLessThan(fullText.length)
+    expect(fullText.startsWith(afterSome!.content)).toBe(true)
 
-    await vi.advanceTimersByTimeAsync(TYPEWRITER_INTERVAL_MS * 3)
-    const afterSixTicks = useAppStore.getState().messages.find((m) => m.role === 'assistant')
-    const expectedAfterSix = fullText.slice(0, Math.min(fullText.length, TYPEWRITER_CHARS_PER_TICK * 6))
-    expect(afterSixTicks?.content).toBe(expectedAfterSix)
-    expect(afterSixTicks!.content.length).toBeGreaterThan(afterThreeTicks!.content.length)
+    await vi.advanceTimersByTimeAsync(TYPEWRITER_INTERVAL_MS * 10)
+    const afterMore = useAppStore.getState().messages.find((m) => m.role === 'assistant')
+    expect(afterMore!.content.length).toBeGreaterThan(afterSome!.content.length)
+    expect(fullText.startsWith(afterMore!.content)).toBe(true)
 
     releaseStream()
-    // Enough ticks to finish revealing the rest, plus room for the done
-    // event's own microtasks to settle.
-    const remainingTicks = Math.ceil((fullText.length - afterSixTicks!.content.length) / TYPEWRITER_CHARS_PER_TICK) + 5
-    await vi.advanceTimersByTimeAsync(TYPEWRITER_INTERVAL_MS * remainingTicks)
+    // Generous upper bound covering the base interval PLUS the longest
+    // possible per-chunk pause for every remaining character, plus room for
+    // the done event's own microtasks to settle — this only needs to be
+    // "enough", not exact.
+    const remainingChars = fullText.length - afterMore!.content.length
+    const worstCaseMsPerChunk = TYPEWRITER_INTERVAL_MS + TYPEWRITER_SENTENCE_PAUSE_MS
+    const remainingTime = Math.ceil(remainingChars / TYPEWRITER_CHARS_PER_TICK) * worstCaseMsPerChunk + 500
+    await vi.advanceTimersByTimeAsync(remainingTime)
     await sendPromise
 
     const finalMessage = useAppStore.getState().messages.find((m) => m.role === 'assistant')
     expect(finalMessage?.content).toContain(fullText)
     expect(finalMessage?.streaming).toBe(false)
+  })
+
+  // Builds a gated single-token SSE stream, like the tests above — held
+  // open until releaseStream() is called so the reveal's own pacing can be
+  // observed precisely with fake timers, without the terminal `done` event
+  // (which snaps content to its full authoritative text and stops the
+  // ticker) arriving mid-assertion and making the timing moot.
+  function gatedTokenStream(text: string) {
+    let releaseStream!: () => void
+    const streamGate = new Promise<void>((resolve) => {
+      releaseStream = resolve
+    })
+    const body = new ReadableStream<Uint8Array>({
+      async start(controller) {
+        controller.enqueue(new TextEncoder().encode(`event: token\ndata: ${JSON.stringify({ text })}\n\n`))
+        await streamGate
+        controller.enqueue(
+          new TextEncoder().encode(
+            `event: done\ndata: ${JSON.stringify({ summary: text, itinerary: [], conversation_id: 'conv-1', kb_sources: [] })}\n\n`,
+          ),
+        )
+        controller.close()
+      },
+    })
+    return { body, releaseStream }
+  }
+
+  it('pauses noticeably longer after sentence-ending punctuation than after an ordinary letter', async () => {
+    vi.useFakeTimers()
+    const fullText = 'Ok. Go' // chunk boundaries (2 chars/tick): "Ok" | ". " | "Go"
+    const { body, releaseStream } = gatedTokenStream(fullText)
+    global.fetch = vi.fn().mockResolvedValueOnce({ ok: true, status: 200, body }) as unknown as typeof fetch
+
+    const sendPromise = useAppStore.getState().send('Say something short')
+    await vi.advanceTimersByTimeAsync(0) // deliver the token event, schedule the first tick
+
+    // Tick 1 (t = INTERVAL_MS): reveals "Ok" — no pause-worthy character in
+    // it, so tick 2 is scheduled at the plain baseline interval.
+    // Tick 2 (t = 2*INTERVAL_MS): reveals ". " — contains a sentence-ending
+    // period, so tick 3 is scheduled INTERVAL_MS + SENTENCE_PAUSE_MS later,
+    // not just INTERVAL_MS later.
+    await vi.advanceTimersByTimeAsync(TYPEWRITER_INTERVAL_MS * 2)
+    const afterPeriod = useAppStore.getState().messages.find((m) => m.role === 'assistant')
+    expect(afterPeriod?.content).toBe('Ok. ')
+
+    // One more plain baseline interval is nowhere near enough to reach the
+    // next tick while the sentence pause is in effect — proves a real pause
+    // was inserted, not just the ordinary cadence continuing.
+    await vi.advanceTimersByTimeAsync(TYPEWRITER_INTERVAL_MS)
+    expect(useAppStore.getState().messages.find((m) => m.role === 'assistant')?.content).toBe('Ok. ')
+
+    // Once the rest of the sentence pause elapses, the final chunk reveals.
+    await vi.advanceTimersByTimeAsync(TYPEWRITER_SENTENCE_PAUSE_MS)
+    expect(useAppStore.getState().messages.find((m) => m.role === 'assistant')?.content).toBe('Ok. Go')
+
+    releaseStream()
+    await sendPromise
+  })
+
+  it('pauses after a comma, less than a full sentence-ending pause but still more than plain text', async () => {
+    vi.useFakeTimers()
+    const fullText = 'Hi, Yo' // chunk boundaries (2 chars/tick): "Hi" | ", " | "Yo"
+    const { body, releaseStream } = gatedTokenStream(fullText)
+    global.fetch = vi.fn().mockResolvedValueOnce({ ok: true, status: 200, body }) as unknown as typeof fetch
+
+    const sendPromise = useAppStore.getState().send('Say hi')
+    await vi.advanceTimersByTimeAsync(0)
+
+    await vi.advanceTimersByTimeAsync(TYPEWRITER_INTERVAL_MS * 2)
+    expect(useAppStore.getState().messages.find((m) => m.role === 'assistant')?.content).toBe('Hi, ')
+
+    // Not yet enough time for the comma pause to have elapsed.
+    await vi.advanceTimersByTimeAsync(TYPEWRITER_INTERVAL_MS)
+    expect(useAppStore.getState().messages.find((m) => m.role === 'assistant')?.content).toBe('Hi, ')
+
+    await vi.advanceTimersByTimeAsync(TYPEWRITER_COMMA_PAUSE_MS)
+    expect(useAppStore.getState().messages.find((m) => m.role === 'assistant')?.content).toBe('Hi, Yo')
+
+    releaseStream()
+    await sendPromise
+  })
+
+  it('pauses briefly at a plain word boundary even with no punctuation at all', async () => {
+    vi.useFakeTimers()
+    const fullText = 'AB CD' // chunk boundaries (2 chars/tick): "AB" | " C" | "D"
+    const { body, releaseStream } = gatedTokenStream(fullText)
+    global.fetch = vi.fn().mockResolvedValueOnce({ ok: true, status: 200, body }) as unknown as typeof fetch
+
+    const sendPromise = useAppStore.getState().send('Say two short words')
+    await vi.advanceTimersByTimeAsync(0)
+
+    await vi.advanceTimersByTimeAsync(TYPEWRITER_INTERVAL_MS * 2)
+    expect(useAppStore.getState().messages.find((m) => m.role === 'assistant')?.content).toBe('AB C')
+
+    // Not yet enough time for the word-boundary pause to have elapsed.
+    await vi.advanceTimersByTimeAsync(TYPEWRITER_INTERVAL_MS)
+    expect(useAppStore.getState().messages.find((m) => m.role === 'assistant')?.content).toBe('AB C')
+
+    await vi.advanceTimersByTimeAsync(TYPEWRITER_WORD_PAUSE_MS)
+    expect(useAppStore.getState().messages.find((m) => m.role === 'assistant')?.content).toBe('AB CD')
+
+    releaseStream()
+    await sendPromise
   })
 
   it('snaps immediately to the full authoritative text on done, even with zero typewriter progress', async () => {
@@ -823,7 +957,18 @@ describe('typewriter reveal — streamed text builds up character-by-character',
       ]),
     ) as unknown as typeof fetch
 
-    await useAppStore.getState().send('Hi')
+    // send() only resolves once the typewriter has actually finished
+    // revealing the full text and finalizeMessage has run — under fake
+    // timers, that requires advancing real ticks (not just microtasks)
+    // before awaiting completion, otherwise the await below would hang
+    // forever waiting on a timer nothing ever advances.
+    const sendPromise = useAppStore.getState().send('Hi')
+    await vi.advanceTimersByTimeAsync(0) // deliver the token+done events
+    const worstCaseMsPerChunk = TYPEWRITER_INTERVAL_MS + TYPEWRITER_SENTENCE_PAUSE_MS
+    await vi.advanceTimersByTimeAsync(
+      Math.ceil(fullText.length / TYPEWRITER_CHARS_PER_TICK) * worstCaseMsPerChunk + 500,
+    )
+    await sendPromise
 
     const messagesBefore = useAppStore.getState().messages
     // If a timer were still running, advancing fake time here would trigger
@@ -832,5 +977,196 @@ describe('typewriter reveal — streamed text builds up character-by-character',
     // direct proof that nothing fired.
     await vi.advanceTimersByTimeAsync(TYPEWRITER_INTERVAL_MS * 20)
     expect(useAppStore.getState().messages).toBe(messagesBefore)
+  })
+
+  it('does not snap to the full result the instant done arrives mid-reveal — content is unchanged until the next tick', async () => {
+    // The exact bug this fix targets: `done` carries the full structured
+    // plan (destination/duration/budget/itinerary — none of which were
+    // ever part of the streamed prose, only ever known once generation
+    // finishes), and it used to replace `content` with that entire
+    // formatted string the instant it arrived, regardless of how far the
+    // typewriter had gotten. That showed up as the reply "finishing itself"
+    // in one frame partway through its own animation.
+    vi.useFakeTimers()
+    let releaseStream!: () => void
+    const streamGate = new Promise<void>((resolve) => {
+      releaseStream = resolve
+    })
+    const streamedText = 'Kandy is a lovely hill-country city with a rich cultural heritage and cool climate.'
+
+    const body = new ReadableStream<Uint8Array>({
+      async start(controller) {
+        controller.enqueue(new TextEncoder().encode(`event: token\ndata: ${JSON.stringify({ text: streamedText })}\n\n`))
+        await streamGate
+        controller.enqueue(
+          new TextEncoder().encode(
+            `event: done\ndata: ${JSON.stringify({
+              summary: streamedText,
+              destination: 'Kandy',
+              days: 3,
+              budget_lkr: 50000,
+              itinerary: [{ day: 1, title: 'Arrival', items: ['Check in', 'Explore town'] }],
+              conversation_id: 'conv-1',
+              kb_sources: [],
+            })}\n\n`,
+          ),
+        )
+        controller.close()
+      },
+    })
+    global.fetch = vi.fn().mockResolvedValueOnce({ ok: true, status: 200, body }) as unknown as typeof fetch
+
+    const sendPromise = useAppStore.getState().send('Plan a trip to Kandy')
+    await vi.advanceTimersByTimeAsync(0)
+    await vi.advanceTimersByTimeAsync(TYPEWRITER_INTERVAL_MS * 4) // reveal a small partial prefix
+
+    const midway = useAppStore.getState().messages.find((m) => m.role === 'assistant')
+    const midwayContent = midway!.content
+    expect(midwayContent.length).toBeGreaterThan(0)
+    expect(midwayContent.length).toBeLessThan(streamedText.length)
+
+    // `done` — carrying destination/days/budget/itinerary, none of it ever
+    // streamed as text — arrives now. Advancing by 0 lets its microtasks
+    // land (reading the mocked stream doesn't need real timer ticks)
+    // WITHOUT giving the reveal ticker any additional time to run.
+    releaseStream()
+    await vi.advanceTimersByTimeAsync(0)
+
+    const rightAfterDone = useAppStore.getState().messages.find((m) => m.role === 'assistant')
+    // The whole point: nothing jumped. Content is exactly what it was the
+    // instant before done arrived, the message hasn't been swapped over to
+    // the structured plan yet, and it's still visibly streaming.
+    expect(rightAfterDone!.content).toBe(midwayContent)
+    expect(rightAfterDone!.plan).toBeUndefined()
+    expect(rightAfterDone!.streaming).toBe(true)
+    expect(useAppStore.getState().isResponding).toBe(true)
+
+    // Only once the ticker is given enough time to actually reach the end
+    // of the text does it finish — gradually, not in one jump.
+    const remainingChars = streamedText.length - midwayContent.length
+    const worstCaseMsPerChunk = TYPEWRITER_INTERVAL_MS + TYPEWRITER_SENTENCE_PAUSE_MS
+    await vi.advanceTimersByTimeAsync(
+      Math.ceil(remainingChars / TYPEWRITER_CHARS_PER_TICK) * worstCaseMsPerChunk + 500,
+    )
+    await sendPromise
+
+    const finalMessage = useAppStore.getState().messages.find((m) => m.role === 'assistant')
+    expect(finalMessage?.streaming).toBe(false)
+    expect(useAppStore.getState().isResponding).toBe(false)
+    // The final saved/displayed result is still exactly what the backend
+    // returned, structured plan included — nothing about deferring the
+    // jump costs any accuracy in the end result.
+    expect(finalMessage?.plan?.destination).toBe('Kandy')
+    expect(finalMessage?.plan?.itinerary).toHaveLength(1)
+    expect(finalMessage?.plan?.summary).toBe(streamedText)
+  })
+
+  it('reveals smoothly all the way to the end — every content update grows by at most one chunk, never a burst', async () => {
+    vi.useFakeTimers()
+    const fullText = 'Kandy is a lovely hill-country city with a rich cultural heritage and cool climate.'
+    global.fetch = vi.fn().mockResolvedValueOnce(
+      sseResponse([
+        { event: 'token', data: { text: fullText } },
+        { event: 'done', data: { summary: fullText, itinerary: [], conversation_id: 'conv-1', kb_sources: [] } },
+      ]),
+    ) as unknown as typeof fetch
+
+    // Records every distinct content value the assistant message ever
+    // takes, in order — a direct, timing-independent way to check the size
+    // of EVERY step of the reveal, rather than sampling at arbitrary
+    // intervals and hoping to catch a burst if one happened.
+    const observedLengths: number[] = []
+    let previousContent: string | undefined
+    const unsubscribe = useAppStore.subscribe((state) => {
+      const assistantMessage = state.messages.find((m) => m.role === 'assistant')
+      if (assistantMessage && assistantMessage.content !== previousContent) {
+        previousContent = assistantMessage.content
+        observedLengths.push(assistantMessage.content.length)
+      }
+    })
+
+    const sendPromise = useAppStore.getState().send('Plan a trip to Kandy')
+    await vi.advanceTimersByTimeAsync(0)
+    const worstCaseMsPerChunk = TYPEWRITER_INTERVAL_MS + TYPEWRITER_SENTENCE_PAUSE_MS
+    await vi.advanceTimersByTimeAsync(
+      Math.ceil(fullText.length / TYPEWRITER_CHARS_PER_TICK) * worstCaseMsPerChunk + 500,
+    )
+    await sendPromise
+    unsubscribe()
+
+    expect(observedLengths.length).toBeGreaterThan(1)
+    // Every single content update grew by at least one and at most one
+    // chunk's worth of characters — strictly forward, never backward, and
+    // never in a big leap. This is the exact property that broke before:
+    // `done` used to replace `content` with the entire formatted plan in
+    // one update, an increase far larger than TYPEWRITER_CHARS_PER_TICK.
+    // (The very last step is the one exception worth noting: finalizeMessage
+    // swaps `content` from the raw summary to formatAssistantReply's output,
+    // which for a summary-only reply like this one just adds a single
+    // leading blank line — still comfortably within the chunk-size bound,
+    // and by then `plan` is already attached so ChatThread.tsx has already
+    // switched to rendering the itinerary card, not this raw string.)
+    for (let i = 1; i < observedLengths.length; i++) {
+      const step = observedLengths[i] - observedLengths[i - 1]
+      expect(step).toBeGreaterThan(0)
+      expect(step).toBeLessThanOrEqual(TYPEWRITER_CHARS_PER_TICK)
+    }
+    const finalMessage = useAppStore.getState().messages.find((m) => m.role === 'assistant')
+    expect(finalMessage?.content).toContain(fullText)
+    expect(finalMessage?.plan?.summary).toBe(fullText)
+  })
+
+  it('stopGenerating jumps straight to the finished result when generation already finished and only the animation is still catching up', async () => {
+    // Once `done` arrives, isResponding (and therefore the Composer's Stop
+    // button) deliberately stays true until the reveal finishes on its own
+    // — otherwise Stop has to keep doing something meaningful for however
+    // long that tail takes, or it looks broken.
+    vi.useFakeTimers()
+    let releaseStream!: () => void
+    const streamGate = new Promise<void>((resolve) => {
+      releaseStream = resolve
+    })
+    const fullText = 'Kandy is a lovely hill-country city with a rich cultural heritage and cool climate.'
+
+    const body = new ReadableStream<Uint8Array>({
+      async start(controller) {
+        controller.enqueue(new TextEncoder().encode(`event: token\ndata: ${JSON.stringify({ text: fullText })}\n\n`))
+        await streamGate
+        controller.enqueue(
+          new TextEncoder().encode(
+            `event: done\ndata: ${JSON.stringify({ summary: fullText, itinerary: [], conversation_id: 'conv-1', kb_sources: [] })}\n\n`,
+          ),
+        )
+        controller.close()
+      },
+    })
+    global.fetch = vi.fn().mockResolvedValueOnce({ ok: true, status: 200, body }) as unknown as typeof fetch
+
+    const sendPromise = useAppStore.getState().send('Plan a trip to Kandy')
+    await vi.advanceTimersByTimeAsync(0)
+    await vi.advanceTimersByTimeAsync(TYPEWRITER_INTERVAL_MS * 2) // reveal a small partial prefix
+
+    releaseStream()
+    await vi.advanceTimersByTimeAsync(0) // deliver done — generation is now finished, the animation isn't
+
+    const stillMidway = useAppStore.getState().messages.find((m) => m.role === 'assistant')
+    expect(stillMidway!.content.length).toBeLessThan(fullText.length)
+    expect(useAppStore.getState().isResponding).toBe(true)
+
+    useAppStore.getState().stopGenerating()
+    await sendPromise
+
+    const finalMessage = useAppStore.getState().messages.find((m) => m.role === 'assistant')
+    // Stop wasn't a no-op just because there was nothing left to abort — it
+    // finished the reveal immediately rather than leaving the button
+    // looking unresponsive for however long the remaining animation would
+    // otherwise have taken.
+    expect(finalMessage?.content).toContain(fullText)
+    expect(finalMessage?.plan?.summary).toBe(fullText)
+    expect(finalMessage?.streaming).toBe(false)
+    expect(useAppStore.getState().isResponding).toBe(false)
+    // Not marked `stopped` — generation itself completed normally; only the
+    // on-screen animation was skipped, a different thing from an aborted reply.
+    expect(finalMessage?.stopped).toBeUndefined()
   })
 })

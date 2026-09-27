@@ -1,3 +1,4 @@
+import json
 import os
 from typing import Dict, Iterator, List, Optional, Tuple
 
@@ -8,6 +9,8 @@ from json_utils import SummaryStreamExtractor, normalize_chat_response
 from pinecone_memory import format_memory_context
 from services.kb_rag import build_kb_sources, format_kb_context, search_knowledge_base
 from services.response_validator import validate_ai_response
+from services.tools import TOOL_SCHEMAS, execute_tool_call
+from services.user_preferences import format_preferences_context
 
 load_dotenv()
 
@@ -64,7 +67,94 @@ def _fallback_reply(summary: str) -> dict:
         "itinerary": [],
         "follow_up_question": "Please try again.",
         "kb_sources": [],
+        "tools_used": [],
     }
+
+
+# System prompt for the separate, lightweight tool-decision call (see
+# _run_tool_calling_phase) — deliberately NOT the main SYSTEM_PROMPT: that
+# one demands a single strict JSON object and says nothing about tools,
+# which is exactly what the FINAL answer call still needs (tool results are
+# folded into ITS system prompt as plain context instead — see
+# _build_prompt_messages below). Keeping the two prompts/calls separate means
+# tool-calling and the existing strict-JSON-mode generation never have to
+# coexist in the same Groq request, which sidesteps any question of whether
+# a given provider supports both at once.
+TOOL_DECISION_SYSTEM_PROMPT = (
+    "You are a travel-planning assistant deciding whether any tools are "
+    "needed to answer the user's message well. Call a tool only when it "
+    "would genuinely improve the answer (e.g. the user asked about weather, "
+    "budget, specific places, or wants a day-by-day itinerary). If no tool "
+    "is needed, respond with no tool calls at all."
+)
+
+# Upper bound on how many tool calls one turn will actually execute, even if
+# the model requests more — keeps a single turn's cost/latency bounded
+# regardless of what the model asks for.
+MAX_TOOL_CALLS_PER_TURN = 4
+
+
+def _run_tool_calling_phase(
+    client: Groq, user_message: str, candidate_tools: List[str]
+) -> Tuple[str, List[str]]:
+    """Offers the model only the tool(s) context_router.py flagged as
+    plausibly relevant for this message (candidate_tools), and lets it
+    decide — via Groq's own function-calling (tool_choice="auto") — whether
+    to actually call any of them. Genuine model agency, just scoped to a
+    short, relevant menu instead of always offering all four tools to every
+    message (same reasoning context_router already applies to
+    memory/history/KB: skip the round trip when it obviously isn't needed).
+
+    Never raises: a failed tool-decision call, a tool the model asks for
+    that doesn't exist, or a tool that errors internally all just mean no
+    tool context gets added — exactly as if the model had chosen not to
+    call anything. Returns (context_block, tool_names_used); context_block
+    is "" when nothing was called, ready to be spliced into the main system
+    prompt alongside memory_context/kb_context.
+    """
+    if not candidate_tools:
+        return "", []
+
+    schemas = [s for s in TOOL_SCHEMAS if s["function"]["name"] in candidate_tools]
+    if not schemas:
+        return "", []
+
+    try:
+        response = client.chat.completions.create(
+            model=GROQ_MODEL,
+            messages=[
+                {"role": "system", "content": TOOL_DECISION_SYSTEM_PROMPT},
+                {"role": "user", "content": user_message},
+            ],
+            tools=schemas,
+            tool_choice="auto",
+            max_tokens=512,
+            temperature=0.2,
+        )
+    except Exception as e:
+        print(f"[tools] tool-decision call failed: {e}")
+        return "", []
+
+    tool_calls = getattr(response.choices[0].message, "tool_calls", None) or []
+    if not tool_calls:
+        return "", []
+
+    tool_names_used: List[str] = []
+    result_lines = [
+        "Tool results (real data — ground your answer in these where "
+        "relevant, but still respond using the exact JSON schema below):"
+    ]
+    for call in tool_calls[:MAX_TOOL_CALLS_PER_TURN]:
+        name = call.function.name
+        try:
+            arguments = json.loads(call.function.arguments or "{}")
+        except json.JSONDecodeError:
+            arguments = {}
+        result = execute_tool_call(name, arguments)
+        tool_names_used.append(name)
+        result_lines.append(f"- {name}({json.dumps(arguments)}): {json.dumps(result)}")
+
+    return "\n".join(result_lines), tool_names_used
 
 
 def _build_prompt_messages(
@@ -73,11 +163,14 @@ def _build_prompt_messages(
     history: Optional[List[Dict[str, str]]],
     use_memory: bool,
     use_knowledge_base: bool,
-) -> Tuple[List[Dict[str, str]], List[dict]]:
+    api_key: str,
+    candidate_tools: Optional[List[str]] = None,
+    user_preferences: Optional[Dict[str, object]] = None,
+) -> Tuple[List[Dict[str, str]], List[dict], List[str]]:
     """Shared setup for both get_groq_reply and stream_groq_reply: the
-    memory/KB lookups, the system prompt, and the final message list handed
-    to Groq. Kept in one place so streaming and non-streaming replies are
-    always grounded in identical context.
+    memory/KB/tool/preferences lookups, the system prompt, and the final
+    message list handed to Groq. Kept in one place so streaming and
+    non-streaming replies are always grounded in identical context.
     """
     # use_memory/use_knowledge_base come from the context_router decision —
     # when it decides a source isn't relevant to this message, skip that
@@ -95,7 +188,29 @@ def _build_prompt_messages(
     kb_context = format_kb_context(kb_hits)
     kb_sources = build_kb_sources(kb_hits)
 
+    # A separate, throwaway Groq client for the tool-decision round only —
+    # cheap to construct (same pattern get_groq_reply/stream_groq_reply
+    # already use for their own client), and keeping it separate from the
+    # main generation client makes the two calls' independence explicit.
+    tool_context = ""
+    tool_names_used: List[str] = []
+    if candidate_tools:
+        tool_client = Groq(api_key=api_key)
+        tool_context, tool_names_used = _run_tool_calling_phase(tool_client, user_message, candidate_tools)
+
+    # Unlike memory/KB/tools, this costs no extra I/O to include — the
+    # caller (routes/chat.py) already has `user_preferences` in hand from
+    # the User row get_current_user_optional resolved for this request, so
+    # there's no "is it worth a round trip" gate here the way there is for
+    # the others. format_preferences_context returns "" for None/empty, so
+    # an anonymous caller (user_preferences never passed at all) or a
+    # first-time account (nothing learned yet) sees a prompt identical to
+    # one built before this feature existed.
+    preferences_context = format_preferences_context(user_preferences)
+
     system_prompt = SYSTEM_PROMPT
+    if preferences_context:
+        system_prompt += f"\n{preferences_context}\n"
     if memory_context:
         system_prompt += f"\n{memory_context}\n"
     if kb_context:
@@ -106,13 +221,15 @@ def _build_prompt_messages(
             "than guessing. Don't list them as itinerary days unless the "
             "user actually asked for an itinerary.\n"
         )
+    if tool_context:
+        system_prompt += f"\n{tool_context}\n"
 
     messages = [{"role": "system", "content": system_prompt}]
     if history:
         messages.extend(history)
     messages.append({"role": "user", "content": user_message})
 
-    return messages, kb_sources
+    return messages, kb_sources, tool_names_used
 
 
 def _make_retry(client: Groq, messages: List[Dict[str, str]]):
@@ -139,14 +256,23 @@ def get_groq_reply(
     history: Optional[List[Dict[str, str]]] = None,
     use_memory: bool = True,
     use_knowledge_base: bool = True,
+    candidate_tools: Optional[List[str]] = None,
+    user_preferences: Optional[Dict[str, object]] = None,
 ) -> dict:
     api_key = os.getenv("GROQ_API_KEY")
     if not api_key:
         raise RuntimeError("GROQ_API_KEY is missing")
 
     try:
-        messages, kb_sources = _build_prompt_messages(
-            user_message, session_id, history, use_memory, use_knowledge_base
+        messages, kb_sources, tool_names_used = _build_prompt_messages(
+            user_message,
+            session_id,
+            history,
+            use_memory,
+            use_knowledge_base,
+            api_key,
+            candidate_tools,
+            user_preferences,
         )
 
         client = Groq(api_key=api_key)
@@ -155,6 +281,7 @@ def get_groq_reply(
 
         validated = validate_ai_response(user_message, normalized, _make_retry(client, messages))
         validated["kb_sources"] = kb_sources
+        validated["tools_used"] = tool_names_used
         return validated
 
     except Exception as e:
@@ -167,6 +294,8 @@ def stream_groq_reply(
     history: Optional[List[Dict[str, str]]] = None,
     use_memory: bool = True,
     use_knowledge_base: bool = True,
+    candidate_tools: Optional[List[str]] = None,
+    user_preferences: Optional[Dict[str, object]] = None,
 ) -> Iterator[Tuple[str, object]]:
     """Same reply pipeline as get_groq_reply (same prompt, same
     normalize/validate/retry, same kb_sources), but as it happens: yields
@@ -218,6 +347,15 @@ def stream_groq_reply(
     already stopped listening. The `finally` block still runs first, though,
     which is what actually releases the underlying HTTP connection to Groq
     instead of leaving it dangling.
+
+    If `candidate_tools` is non-empty, a separate, non-streamed tool-decision
+    call happens first (see _build_prompt_messages/_run_tool_calling_phase) —
+    entirely before this function's own Groq stream even starts, so it adds
+    a bounded amount of latency before the first token, but never changes
+    the streaming contract itself: tool results just become more context
+    folded into the same system prompt memory_context/kb_context already
+    use, and any tools actually used surface in the terminal ("done", ...)
+    payload's `tools_used` list, same as `kb_sources` already does.
     """
     api_key = os.getenv("GROQ_API_KEY")
     if not api_key:
@@ -226,8 +364,15 @@ def stream_groq_reply(
 
     completion_stream = None
     try:
-        messages, kb_sources = _build_prompt_messages(
-            user_message, session_id, history, use_memory, use_knowledge_base
+        messages, kb_sources, tool_names_used = _build_prompt_messages(
+            user_message,
+            session_id,
+            history,
+            use_memory,
+            use_knowledge_base,
+            api_key,
+            candidate_tools,
+            user_preferences,
         )
 
         client = Groq(api_key=api_key)
@@ -273,6 +418,7 @@ def stream_groq_reply(
 
         validated = validate_ai_response(user_message, normalized, _make_retry(client, messages))
         validated["kb_sources"] = kb_sources
+        validated["tools_used"] = tool_names_used
         yield ("done", validated)
 
     except Exception as e:

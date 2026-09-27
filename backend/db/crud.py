@@ -192,3 +192,16 @@ def update_user_password(db, user_id: str, password_hash: str) -> None:
         {"password_hash": password_hash, "password_changed_at": datetime.utcnow()}
     )
     db.commit()
+
+
+def update_user_preferences(db, user_id: str, preferences: dict) -> None:
+    """Persists the merged preferences dict produced by
+    services.user_preferences.extract_and_merge_preferences. Scoped purely
+    by `user_id` (the account's own primary key) — there is no shared
+    namespace here for two accounts to collide in, unlike session_id-keyed
+    Pinecone memory (see that module's own docstring).
+    """
+    db.query(User).filter(User.id == user_id).update(
+        {"preferences": preferences, "preferences_updated_at": datetime.utcnow()}
+    )
+    db.commit()

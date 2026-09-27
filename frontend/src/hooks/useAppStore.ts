@@ -38,13 +38,45 @@ interface AppState {
 const SESSION_STORAGE_KEY = 'voya_session_id'
 let cachedSessionId: string | null = null
 
-// Typewriter reveal speed for a streaming assistant message — tune these
-// two together to make the effect faster/slower without touching the
-// reveal logic itself (see send()'s revealTick). Exported so tests can
-// advance fake timers by an exact multiple of the real interval instead of
-// guessing at one.
+// Cinematic typewriter reveal for a streaming assistant message — tune
+// these together to make the effect faster/slower/pausier without
+// touching the reveal logic itself (see send()'s revealTick). Exported so
+// tests can advance fake timers by an exact multiple of the base interval,
+// or by an exact pause duration, instead of guessing at either.
+//
+// TYPEWRITER_INTERVAL_MS/TYPEWRITER_CHARS_PER_TICK set the baseline
+// cadence (how fast plain text reveals). The three pause constants below
+// add extra delay ON TOP of that baseline immediately after certain
+// characters are revealed — sentence-ending punctuation pauses longest, a
+// comma pauses less, and a plain word boundary (space) pauses only
+// slightly — which is what keeps the reveal reading like natural speech
+// instead of a constant mechanical drip.
 export const TYPEWRITER_INTERVAL_MS = 16
 export const TYPEWRITER_CHARS_PER_TICK = 2
+export const TYPEWRITER_SENTENCE_PAUSE_MS = 220
+export const TYPEWRITER_COMMA_PAUSE_MS = 110
+export const TYPEWRITER_WORD_PAUSE_MS = 45
+
+// Extra pause (beyond the baseline interval) to insert after revealing a
+// chunk that contains a sentence end, a comma, or a word boundary — checked
+// across the WHOLE chunk (not just its last character) since
+// TYPEWRITER_CHARS_PER_TICK can reveal more than one character at a time,
+// and a pause-worthy character can land anywhere inside that chunk. When a
+// chunk contains more than one kind (e.g. ". " — a period then a space),
+// the strongest applicable pause wins rather than whichever is checked last.
+function extraPauseForChunk(chunk: string): number {
+  let pause = 0
+  for (const char of chunk) {
+    if (char === '.' || char === '!' || char === '?') {
+      pause = Math.max(pause, TYPEWRITER_SENTENCE_PAUSE_MS)
+    } else if (char === ',') {
+      pause = Math.max(pause, TYPEWRITER_COMMA_PAUSE_MS)
+    } else if (char === ' ') {
+      pause = Math.max(pause, TYPEWRITER_WORD_PAUSE_MS)
+    }
+  }
+  return pause
+}
 
 // The in-flight send()'s AbortController, if any — module-level rather than
 // store state because it's plumbing for cancellation, not UI-facing data
@@ -53,6 +85,18 @@ export const TYPEWRITER_CHARS_PER_TICK = 2
 // only ever at most one of these active at a time; stopGenerating() just
 // aborts whichever one that is.
 let activeAbortController: AbortController | null = null
+
+// The in-flight send()'s "finish the reveal right now" hook, if any — set
+// only once the backend's authoritative `done` payload has arrived but the
+// typewriter hasn't finished animating it yet (see send()'s finalizeMessage
+// below). isResponding — and therefore the Composer's Stop button — stays
+// true for that entire animation tail, not just until the network response
+// itself completes, so Stop has to remain able to do SOMETHING the whole
+// time: abort the request if generation is still genuinely in flight, or,
+// if generation already finished and only the on-screen animation is still
+// catching up, jump straight to the finished result instead of silently
+// doing nothing.
+let activeRevealSkip: (() => void) | null = null
 
 function createId(): string {
   if (typeof crypto !== 'undefined' && 'randomUUID' in crypto) {
@@ -428,35 +472,81 @@ export const useAppStore = create<AppState>((set, get) => ({
     // inside the try block below) so the catch block can also reach
     // stopTypewriter()/targetText when the stream is aborted or fails, to
     // stop the ticker and settle on the right final text either way. See
-    // TYPEWRITER_INTERVAL_MS/TYPEWRITER_CHARS_PER_TICK for the actual speed.
-    // `targetText` is the raw, fully-arrived text (exactly what the old
-    // direct-set behavior used to show immediately); revealTick is what
-    // actually grows the bubble's visible `content`, a fixed few characters
-    // at a time on a fixed interval, independent of however bursty Groq's
-    // own network chunking happens to be. The terminal `done` event still
-    // carries the exact same authoritative payload POST /api/v1/chat/ used
-    // to return directly, and immediately snaps `content` to it (stopping
-    // the ticker) — the typewriter only ever governs how the IN-PROGRESS
-    // text is displayed, never what ultimately gets shown or saved.
+    // TYPEWRITER_INTERVAL_MS/TYPEWRITER_CHARS_PER_TICK/the pause constants
+    // above for the actual speed and pacing. `targetText` is what the
+    // ticker is currently typing toward; revealTick grows the bubble's
+    // visible `content` a fixed few characters at a time, independent of
+    // however bursty Groq's own network chunking happens to be. Unlike a
+    // fixed setInterval, each next tick is scheduled individually via
+    // setTimeout with its OWN delay — the baseline interval plus, when the
+    // chunk just revealed contained a sentence end, comma, or space, an
+    // extra pause on top (see extraPauseForChunk) — which is what gives the
+    // reveal its natural, cinematic pacing instead of a constant drip.
+    //
+    // Finishing is deliberately NOT "the terminal `done` event immediately
+    // snaps content to the full result". `done`'s payload is the full
+    // structured plan — destination/duration/budget/itinerary lines that
+    // were never part of the streamed text at all, only ever known once
+    // generation completes — so setting `content` to it outright (as this
+    // used to do) doesn't extend whatever prose the typewriter had reached;
+    // it REPLACES it with a longer, differently-shaped string in one frame,
+    // which reads as the reply suddenly finishing itself mid-animation.
+    // Instead, `done` only updates what the ticker is typing toward (the
+    // authoritative summary text — see onDone below) and keeps it running;
+    // finalizeMessage (attaching the structured `plan`, which is what
+    // switches ChatThread.tsx over to the itinerary card) only ever runs
+    // once the ticker has actually reached the end of that text on its own.
     let targetText = ''
     let revealedLength = 0
-    let typewriterTimer: ReturnType<typeof setInterval> | null = null
+    let typewriterTimer: ReturnType<typeof setTimeout> | null = null
+    let doneData: ChatResponse | null = null
+    let finalized = false
+    let resolveRevealComplete: () => void = () => {}
+    const revealComplete = new Promise<void>((resolve) => {
+      resolveRevealComplete = resolve
+    })
 
     const stopTypewriter = () => {
       if (typewriterTimer !== null) {
-        clearInterval(typewriterTimer)
+        clearTimeout(typewriterTimer)
         typewriterTimer = null
       }
     }
 
+    // Attaches the structured plan and flips the message out of "streaming"
+    // — the ONE place that happens, so it's impossible for it to run twice
+    // (guarded by `finalized`) regardless of which of revealTick/onDone/
+    // stopGenerating's skip-to-end path gets there first.
+    const finalizeMessage = (data: ChatResponse) => {
+      if (finalized) return
+      finalized = true
+      stopTypewriter()
+      const assistantText = formatAssistantReply(data)
+      set((state) => ({
+        isResponding: false,
+        messages: state.messages.map((m) =>
+          m.id === `a-${stamp}`
+            ? { ...m, pending: false, streaming: false, content: assistantText, plan: data }
+            : m,
+        ),
+      }))
+      resolveRevealComplete()
+    }
+
     const revealTick = () => {
+      typewriterTimer = null
       if (revealedLength >= targetText.length) {
-        // Caught up with everything that has arrived so far — pause rather
-        // than spin; onToken restarts this the next time more text comes in.
-        stopTypewriter()
+        // Caught up with everything that has arrived so far. If the
+        // authoritative `done` payload is already in hand, that means the
+        // reveal has now genuinely reached the end of it — finish for real.
+        // Otherwise just stop scheduling; onToken/onDone restart this the
+        // next time more text comes in.
+        if (doneData) finalizeMessage(doneData)
         return
       }
-      revealedLength = Math.min(targetText.length, revealedLength + TYPEWRITER_CHARS_PER_TICK)
+      const nextLength = Math.min(targetText.length, revealedLength + TYPEWRITER_CHARS_PER_TICK)
+      const revealedChunk = targetText.slice(revealedLength, nextLength)
+      revealedLength = nextLength
       const visibleText = targetText.slice(0, revealedLength)
       set((state) => ({
         messages: state.messages.map((m) =>
@@ -468,7 +558,29 @@ export const useAppStore = create<AppState>((set, get) => ({
           m.id === `a-${stamp}` ? { ...m, pending: false, streaming: true, content: visibleText } : m,
         ),
       }))
+
+      if (revealedLength < targetText.length) {
+        typewriterTimer = setTimeout(revealTick, TYPEWRITER_INTERVAL_MS + extraPauseForChunk(revealedChunk))
+      } else if (doneData) {
+        finalizeMessage(doneData)
+      }
     }
+
+    // Registered so stopGenerating() can reach it (see activeRevealSkip's
+    // own comment) — jumps straight to the finished result if generation
+    // has already completed and only the on-screen animation is still
+    // catching up; a no-op if `done` hasn't arrived yet (there's nothing
+    // finished to jump to — aborting the request, which stopGenerating()
+    // always does first, is what actually stops that case). Kept as its
+    // own named function (not just assigned inline) so the `finally` block
+    // below can check it's still THIS call's hook before clearing it.
+    const skipToEndOfReveal = () => {
+      if (doneData) {
+        revealedLength = targetText.length
+        finalizeMessage(doneData)
+      }
+    }
+    activeRevealSkip = skipToEndOfReveal
 
     set((state) => ({
       isResponding: true,
@@ -499,19 +611,12 @@ export const useAppStore = create<AppState>((set, get) => ({
           onToken: (chunk) => {
             targetText += chunk
             if (typewriterTimer === null) {
-              typewriterTimer = setInterval(revealTick, TYPEWRITER_INTERVAL_MS)
+              typewriterTimer = setTimeout(revealTick, TYPEWRITER_INTERVAL_MS)
             }
           },
           onDone: (rawData) => {
             const data = rawData as ChatResponse
-            const assistantText = formatAssistantReply(data)
-
-            // The reply is complete — show it in full immediately rather
-            // than let the typewriter keep catching up on its own schedule
-            // (it may also differ from `targetText` if a validation retry
-            // corrected the summary server-side; `done` is always
-            // authoritative over whatever was mid-reveal).
-            stopTypewriter()
+            doneData = data
 
             // Covers the rare case where no conversation existed yet and
             // the backend created one on the fly.
@@ -520,34 +625,66 @@ export const useAppStore = create<AppState>((set, get) => ({
               set({ activeConversationId: conversationId })
             }
 
-            set((state) => ({
-              isResponding: false,
-              messages: state.messages.map((m) =>
-                m.id === `a-${stamp}`
-                  ? { ...m, pending: false, streaming: false, content: assistantText, plan: data }
-                  : m,
-              ),
-              // Insert/bump Recent Chats immediately, from data already in
-              // hand — this is the actual guarantee that a sent chat appears,
-              // not the network refresh below. See
-              // upsertConversationOptimistically's own comment for why.
-              conversations: conversationId
-                ? upsertConversationOptimistically(state.conversations, conversationId, sessionId, text)
-                : state.conversations,
-            }))
+            // Insert/bump Recent Chats right now, from data already in hand
+            // — this is the actual guarantee that a sent chat appears, not
+            // the network refresh further below, and it must not wait on
+            // the typewriter animation to finish catching up (that can take
+            // a while longer for a long reply). See
+            // upsertConversationOptimistically's own comment for why.
+            if (conversationId) {
+              const currentConversationId = conversationId
+              set((state) => ({
+                conversations: upsertConversationOptimistically(state.conversations, currentConversationId, sessionId, text),
+              }))
+            }
+
+            // `done`'s authoritative summary (it may differ slightly from
+            // the raw streamed text if a validation retry corrected it
+            // server-side) becomes the new thing the ticker is typing
+            // toward — NOT an instant replacement of `content`. If the
+            // ticker had already typed further than this text is long
+            // (unusual, but possible after a correction), clamp back so the
+            // next tick continues from a valid position instead of reading
+            // past the end of the new target.
+            targetText = data.summary
+            if (revealedLength > targetText.length) {
+              revealedLength = targetText.length
+            }
+
+            if (revealedLength >= targetText.length) {
+              // Already fully typed out (e.g. an empty summary, or the
+              // ticker had genuinely caught all the way up already) —
+              // finish now rather than waiting on a tick that will never
+              // fire.
+              finalizeMessage(data)
+            } else if (typewriterTimer === null) {
+              // Covers streams that send their entire reply as `done` with
+              // no `token` events at all — the ticker was never started.
+              typewriterTimer = setTimeout(revealTick, TYPEWRITER_INTERVAL_MS)
+            }
+            // Otherwise a tick is already scheduled and will keep typing
+            // toward the (now possibly-updated) targetText on its own;
+            // revealTick itself calls finalizeMessage once it actually
+            // reaches the end.
           },
         },
         { headers: authExpectationHeaders(), signal: controller.signal },
       )
 
-      // Defensive only: streamPost throws on a reported `error` event or a
-      // non-2xx/network failure (caught below, same as before), and the
-      // backend's chat_stream always sends a terminal `done`. The one gap
-      // neither of those covers is a connection that just ends without
-      // either — this stops the composer from being stuck "responding"
-      // forever if that ever happens, instead of only reacting to failures
-      // the stream actually reported.
-      if (get().isResponding) {
+      if (doneData) {
+        // The network side is done, but the on-screen animation may still
+        // be mid-reveal — wait for it to actually finish (finalizeMessage)
+        // before treating send() itself as complete, so isResponding/plan
+        // aren't left stale while text is still visibly typing.
+        await revealComplete
+      } else if (get().isResponding) {
+        // Defensive only: streamPost throws on a reported `error` event or
+        // a non-2xx/network failure (caught below, same as before), and the
+        // backend's chat_stream always sends a terminal `done`. The one gap
+        // neither of those covers is a connection that just ends without
+        // either — this stops the composer from being stuck "responding"
+        // forever if that ever happens, instead of only reacting to
+        // failures the stream actually reported.
         stopTypewriter()
         set((state) => ({
           isResponding: false,
@@ -645,24 +782,31 @@ export const useAppStore = create<AppState>((set, get) => ({
         useAuthStore.getState().fetchCurrentUser()
       }
     } finally {
-      // Only clear it if it's still this call's controller — irrelevant in
-      // practice (send() refuses a second concurrent call while
-      // isResponding is true) but keeps this from ever clobbering a
-      // different, newer controller.
+      // Only clear it if it's still this call's controller/skip hook —
+      // irrelevant in practice (send() refuses a second concurrent call
+      // while isResponding is true) but keeps this from ever clobbering a
+      // different, newer call's.
       if (activeAbortController === controller) {
         activeAbortController = null
+      }
+      if (activeRevealSkip === skipToEndOfReveal) {
+        activeRevealSkip = null
       }
     }
   },
 
   // Cancels the in-flight send(), if any (see the Composer's Stop button).
-  // Aborting the fetch is the entire mechanism — send()'s own try/catch
-  // (see the ApiAbortError branch above) is what actually turns that into
-  // clean UI state, so this action has nothing else to do. A stray call
-  // with nothing in flight (e.g. a double-click racing the request's own
-  // natural completion) is a harmless no-op: AbortController#abort() on an
-  // already-settled controller does nothing.
+  // Two distinct things can be in flight when this is clicked, and both
+  // need handling: generation itself might still be running (abort the
+  // fetch — send()'s own try/catch, the ApiAbortError branch above, turns
+  // that into clean UI state) — or generation might have already finished
+  // and only the typewriter's on-screen animation is still catching up
+  // (nothing left to abort; activeRevealSkip jumps straight to the
+  // finished result instead of leaving Stop looking unresponsive for
+  // however long the remaining animation would otherwise take). A stray
+  // call with nothing in flight is a harmless no-op either way.
   stopGenerating: () => {
     activeAbortController?.abort()
+    activeRevealSkip?.()
   },
 }))

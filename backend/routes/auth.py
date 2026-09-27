@@ -19,7 +19,7 @@ from typing import Optional
 from fastapi import APIRouter, Depends, HTTPException, Request, Response, status
 from sqlalchemy.orm import Session
 
-from db.crud import create_user, get_user_by_email, get_user_by_id, update_user_password
+from db.crud import create_user, get_user_by_email, get_user_by_id, update_user_password, update_user_preferences
 from db.models import User
 from db.session import SessionLocal
 from redis_client import redis_client
@@ -31,6 +31,7 @@ from schemas.auth import (
     SignupRequest,
     UserResponse,
 )
+from schemas.preferences import UserPreferences, UserPreferencesUpdate
 from services.email_service import send_password_reset_email
 from services.password_service import hash_password, verify_password
 from services.rate_limit_service import check_and_increment
@@ -291,3 +292,46 @@ def reset_password(request: ResetPasswordRequest, db: Session = Depends(get_db))
 @router.get("/me", response_model=UserResponse)
 def me(current_user: User = Depends(get_current_user)):
     return UserResponse.model_validate(current_user)
+
+
+@router.get("/preferences", response_model=UserPreferences)
+def get_preferences(current_user: User = Depends(get_current_user)):
+    """Always scoped to the caller resolved from their own session cookie
+    (get_current_user) — there is no user id anywhere in this route's URL
+    or body for a client to tamper with, so one account can't even attempt
+    to ask for another's preferences; the identity is never client-supplied.
+    """
+    return UserPreferences.from_stored(current_user.preferences)
+
+
+@router.put("/preferences", response_model=UserPreferences)
+def update_preferences(
+    request: UserPreferencesUpdate,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+    _: None = Depends(verify_csrf),
+):
+    """Full replace, not a partial patch — see UserPreferencesUpdate's own
+    docstring for why. The same db/crud.py.update_user_preferences the
+    automatic, chat-driven learning path already uses (see routes/chat.py's
+    _learn_preferences) — a manual edit here and a preference the assistant
+    picks up from a later chat message both just overwrite this one stored
+    dict, whichever happens more recently (see the response's limitations).
+    """
+    preferences = request.to_stored_dict()
+    update_user_preferences(db, current_user.id, preferences)
+    return UserPreferences.from_stored(preferences)
+
+
+@router.delete("/preferences", response_model=UserPreferences)
+def clear_preferences(
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+    _: None = Depends(verify_csrf),
+):
+    """Resets to a clean slate — the assistant goes back to treating the
+    next message like a first-time user, exactly like an account that has
+    never taught it anything.
+    """
+    update_user_preferences(db, current_user.id, {})
+    return UserPreferences.from_stored({})

@@ -23,6 +23,14 @@ export interface ChatResponse {
   follow_up_question?: string | null
   conversation_id?: string | null
   kb_sources?: KBSource[]
+  // Names of backend tools (weather/places/budget/itinerary — see
+  // backend/services/tools.py) the assistant actually called for this
+  // reply, e.g. ["get_weather", "calculate_budget"]. The tool results
+  // themselves are already woven into `summary`/`itinerary` server-side —
+  // this is only the list of which ones ran, rendered as small "Tools
+  // used" chips in ItineraryCard.tsx (see its TOOL_META map for the
+  // label/icon per tool name).
+  tools_used?: string[]
 }
 
 export interface Message {

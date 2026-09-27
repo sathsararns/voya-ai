@@ -51,6 +51,15 @@ class ChatResponse(BaseModel):
     follow_up_question: Optional[str] = None
     conversation_id: Optional[str] = None
     kb_sources: List[KBSource] = Field(default_factory=list)
+    # Names of tools (see services/tools.py) the model actually chose to
+    # call for this turn, e.g. ["get_weather", "calculate_budget"] — empty
+    # when tool-calling wasn't offered (context_router.py found no relevant
+    # keyword) or was offered but the model chose not to use any. Metadata
+    # only: the tool results themselves are folded into the model's own
+    # prompt server-side (see groq_service.py's _run_tool_calling_phase) and
+    # show up naturally in `summary`/`itinerary` — this field doesn't carry
+    # the raw tool output, only which ones ran.
+    tools_used: List[str] = Field(default_factory=list)
 
 
 class ChatHistoryItem(BaseModel):

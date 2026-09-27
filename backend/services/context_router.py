@@ -15,7 +15,8 @@ callers only ever depend on the ContextDecision shape, not on how it's
 produced. See decide_context_strategy() for the entry point.
 """
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
+from typing import List
 
 
 @dataclass
@@ -27,6 +28,17 @@ class ContextDecision:
     use_summarized_context: bool
     use_knowledge_base: bool
     route_reason: str
+    # Tool names (see services/tools.py's TOOL_SCHEMAS) plausibly relevant to
+    # this message, e.g. ["get_weather", "calculate_budget"] — empty means
+    # skip the tool-calling round entirely for this message (see
+    # groq_service.py's _run_tool_calling_phase). This is a MENU, not a
+    # decision to actually call anything: the model still gets to choose,
+    # via its own tool_choice="auto" call, whether to use any of these,
+    # exactly one, or several — this just keeps that choice scoped to a
+    # short, relevant list instead of always offering every tool to every
+    # message (same "don't pay for a round trip nothing needs" philosophy
+    # this whole module already applies to memory/history/KB).
+    candidate_tools: List[str] = field(default_factory=list)
 
 
 # Short greetings/acknowledgements — never worth any retrieval.
@@ -74,6 +86,31 @@ KNOWLEDGE_BASE_KEYWORDS = {
     "things to do", "what to do", "places to visit", "worth visiting",
     "attractions", "must see", "must-see", "where to visit", "landmark",
     "tourist spot", "sightseeing",
+}
+
+
+# Keyword groups that route to a SPECIFIC tool (see services/tools.py) —
+# deliberately separate from KNOWLEDGE_BASE_KEYWORDS even though some
+# overlap (e.g. "weather"): a factual weather QUESTION still uses the
+# knowledge base exactly as before, and now ALSO offers the model the
+# get_weather tool for structured, numeric-ish data — offering a tool never
+# removes the knowledge-base path, the two are independent and can both
+# fire for the same message.
+WEATHER_TOOL_KEYWORDS = {
+    "weather", "climate", "temperature", "rain", "rainy", "monsoon",
+    "forecast", "how hot", "how cold", "what to pack",
+}
+BUDGET_TOOL_KEYWORDS = {
+    "budget", "cost", "how much", "price", "spend", "expensive", "cheap", "afford",
+}
+PLACES_TOOL_KEYWORDS = {
+    "places to visit", "things to do", "attractions", "recommend a place",
+    "worth visiting", "must see", "must-see", "sightseeing", "where to go",
+    "what to see", "spots to visit",
+}
+ITINERARY_TOOL_KEYWORDS = {
+    "itinerary", "plan a", "plan my", "plan the", "plan me", "day trip",
+    "day-by-day", "schedule my trip", "build an itinerary", "create an itinerary",
 }
 
 
@@ -137,6 +174,22 @@ def decide_context_strategy(user_message: str, conversation_message_count: int) 
     # turns, so it isn't gated on has_prior_history the way history is.
     use_knowledge_base = is_factual_question and not is_greeting and not is_short_command
 
+    # --- tools: same "skip it if the message obviously doesn't need it"
+    # gate as everything else here. A message can trigger more than one
+    # category (e.g. "plan a 3 day trip to Kandy with a budget and what to
+    # pack" plausibly wants itinerary + budget + weather all at once) — each
+    # independently offered, none gated on the others.
+    candidate_tools: List[str] = []
+    if not is_greeting and not is_short_command:
+        if _contains_any(text, WEATHER_TOOL_KEYWORDS):
+            candidate_tools.append("get_weather")
+        if _contains_any(text, BUDGET_TOOL_KEYWORDS):
+            candidate_tools.append("calculate_budget")
+        if _contains_any(text, PLACES_TOOL_KEYWORDS):
+            candidate_tools.append("search_places")
+        if _contains_any(text, ITINERARY_TOOL_KEYWORDS):
+            candidate_tools.append("generate_itinerary")
+
     if is_greeting or is_short_command:
         route_reason = "greeting_or_short_command_no_retrieval"
     elif use_conversation_history and use_pinecone_memory:
@@ -152,6 +205,8 @@ def decide_context_strategy(user_message: str, conversation_message_count: int) 
 
     if use_knowledge_base:
         route_reason += "+kb"
+    if candidate_tools:
+        route_reason += "+tools(" + ",".join(candidate_tools) + ")"
 
     return ContextDecision(
         use_conversation_history=use_conversation_history,
@@ -159,4 +214,5 @@ def decide_context_strategy(user_message: str, conversation_message_count: int) 
         use_summarized_context=use_summarized_context,
         use_knowledge_base=use_knowledge_base,
         route_reason=route_reason,
+        candidate_tools=candidate_tools,
     )

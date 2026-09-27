@@ -1,7 +1,7 @@
 from datetime import datetime
 from uuid import uuid4
 
-from sqlalchemy import Boolean, Column, DateTime, ForeignKey, Integer, String, Text
+from sqlalchemy import JSON, Boolean, Column, DateTime, ForeignKey, Integer, String, Text
 from db.session import Base
 
 
@@ -67,6 +67,28 @@ class User(Base):
     # tokens issued before a reset stop validating even though they haven't
     # technically expired yet — see services/token_service.py.
     password_changed_at = Column(DateTime, nullable=False, default=datetime.utcnow)
+
+    # Persistent, account-scoped travel-preferences summary — see
+    # services/user_preferences.py, which owns both the shape of this dict
+    # (preferred destinations, budget range, hotel/transport/food/activity
+    # preferences, overall travel style) and how it's extracted/merged from
+    # each chat turn. Nullable, not a default-factory dict: NULL and {} are
+    # treated identically ("nothing learned yet") by every reader, so there's
+    # no need to force a row write just to normalize the column's own default.
+    # Deliberately a column on User itself, not a separate table — this is a
+    # small, single-owner, 1:1 summary with no independent lifecycle of its
+    # own, the same relationship a "profile" field would have. Added via
+    # Alembic (see alembic/versions/f3a9c1d2e4b7_add_user_preferences.py) —
+    # `users` is Alembic-owned, unlike conversations/chat_history (see
+    # db/bootstrap.py's module docstring).
+    #
+    # Loaded automatically on every authenticated chat request — no separate
+    # "reload on login" step exists or is needed, because this column comes
+    # back fresh every time routes/auth.py's get_current_user_optional
+    # re-fetches the User row from the JWT's subject claim, which already
+    # happens on every request regardless of this feature.
+    preferences = Column(JSON, nullable=True)
+    preferences_updated_at = Column(DateTime, nullable=True)
 
     created_at = Column(DateTime, default=datetime.utcnow)
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)

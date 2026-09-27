@@ -117,6 +117,16 @@ export const api = {
       body: body !== undefined ? JSON.stringify(body) : undefined,
       headers,
     }),
+  put: <T>(path: string, body?: unknown, headers?: Record<string, string>) =>
+    request<T>(path, {
+      method: 'PUT',
+      body: body !== undefined ? JSON.stringify(body) : undefined,
+      headers,
+    }),
+  // Named `del`, not `delete` — a reserved word as a bare property key is
+  // fine in modern JS, but `api.delete(...)` reads awkwardly next to
+  // get/post/put and some linters still flag it out of old habit.
+  del: <T>(path: string, headers?: Record<string, string>) => request<T>(path, { method: 'DELETE', headers }),
 }
 
 // --- Server-Sent Events (streaming chat) ------------------------------------

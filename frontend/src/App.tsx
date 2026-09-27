@@ -3,6 +3,7 @@ import { BrowserRouter, Navigate, Route, Routes } from "react-router-dom";
 import { Sidebar } from "./components/Sidebar";
 import { TopBar } from "./components/TopBar";
 import { Home } from "./pages/Home";
+import { SettingsPage } from "./pages/SettingsPage";
 import { LoginPage } from "./pages/LoginPage";
 import { SignupPage } from "./pages/SignupPage";
 import { ForgotPasswordPage } from "./pages/ForgotPasswordPage";
@@ -28,7 +29,10 @@ function ChatApp() {
       <div className="flex min-h-0 min-w-0 flex-1 flex-col">
         <TopBar />
         <div className="flex min-h-0 min-w-0 flex-1 flex-col pt-16">
-          <Home />
+          <Routes>
+            <Route path="/settings" element={<SettingsPage />} />
+            <Route path="/*" element={<Home />} />
+          </Routes>
         </div>
       </div>
     </div>

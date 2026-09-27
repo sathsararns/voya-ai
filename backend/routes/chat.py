@@ -31,9 +31,11 @@ from db.crud import (
     get_or_create_conversation,
     list_conversations,
     touch_conversation,
+    update_user_preferences,
 )
 from pinecone_memory import save_memory
 from memory_utils import build_memory_text
+from services.user_preferences import extract_and_merge_preferences
 from routes.auth import get_current_user_optional
 
 router = APIRouter(prefix="/api/v1/chat", tags=["chat"])
@@ -69,6 +71,7 @@ def _deserialize_reply(raw_reply: str) -> dict:
             "itinerary": [],
             "follow_up_question": None,
             "kb_sources": [],
+            "tools_used": [],
         }
 
 
@@ -77,6 +80,23 @@ def _default_title(user_message: str) -> str:
     if len(text) > CONVERSATION_TITLE_MAX_LENGTH:
         return f"{text[:CONVERSATION_TITLE_MAX_LENGTH]}…"
     return text
+
+
+def _learn_preferences(db: Session, current_user: Optional[User], user_message: str, reply_data: dict) -> None:
+    """Updates current_user's stored, cross-session preferences (see
+    services/user_preferences.py) from this one turn, writing only if
+    something actually changed. A no-op for an anonymous caller
+    (current_user is None) — this check is the entire mechanism that keeps
+    anonymous chat from ever reading or writing any account's preferences;
+    there is no other gate anywhere else in this path.
+    """
+    if current_user is None:
+        return
+
+    existing = current_user.preferences or {}
+    updated = extract_and_merge_preferences(current_user.preferences, user_message, reply_data)
+    if updated != existing:
+        update_user_preferences(db, current_user.id, updated)
 
 
 @router.post("/", response_model=ChatResponse)
@@ -101,7 +121,8 @@ def chat(
         f"history={decision.use_conversation_history} "
         f"memory={decision.use_pinecone_memory} "
         f"summarized={decision.use_summarized_context} "
-        f"knowledge_base={decision.use_knowledge_base}"
+        f"knowledge_base={decision.use_knowledge_base} "
+        f"candidate_tools={decision.candidate_tools}"
     )
 
     history = []
@@ -117,10 +138,16 @@ def chat(
         history=history,
         use_memory=decision.use_pinecone_memory,
         use_knowledge_base=decision.use_knowledge_base,
+        candidate_tools=decision.candidate_tools,
+        # None for an anonymous caller — get_groq_reply/_build_prompt_messages
+        # treat that identically to "nothing learned yet", so an anonymous
+        # request's prompt is completely unaffected by this feature existing.
+        user_preferences=current_user.preferences if current_user else None,
     )
 
     save_chat(db, request.message, reply_data, session_id, conversation_id)
     touch_conversation(db, conversation_id, title=_default_title(request.message))
+    _learn_preferences(db, current_user, request.message, reply_data)
 
     memory_text = build_memory_text(request.message, reply_data)
 
@@ -207,7 +234,8 @@ def chat_stream(
         f"history={decision.use_conversation_history} "
         f"memory={decision.use_pinecone_memory} "
         f"summarized={decision.use_summarized_context} "
-        f"knowledge_base={decision.use_knowledge_base}"
+        f"knowledge_base={decision.use_knowledge_base} "
+        f"candidate_tools={decision.candidate_tools}"
     )
 
     history = []
@@ -227,6 +255,12 @@ def chat_stream(
         # explicitly wrapped in run_in_threadpool: without that, a slow Groq
         # response or a slow DB write would stall every other request this
         # server is handling concurrently, not just this one.
+        #
+        # If decision.candidate_tools is non-empty, stream_groq_reply's first
+        # step (inside _build_prompt_messages) is a separate, non-streamed
+        # tool-decision call — entirely before the loop below starts, so it
+        # adds latency before the first token but never changes anything
+        # about the loop/disconnect-handling itself.
         reply_data: Optional[dict] = None
         aborted = False
 
@@ -236,6 +270,8 @@ def chat_stream(
             history=history,
             use_memory=decision.use_pinecone_memory,
             use_knowledge_base=decision.use_knowledge_base,
+            candidate_tools=decision.candidate_tools,
+            user_preferences=current_user.preferences if current_user else None,
         )
 
         try:
@@ -318,13 +354,13 @@ def chat_stream(
         # itself is shielded from that outer cancellation on purpose:
         # Starlette's own disconnect-driven cancellation (see the loop
         # above's comment) can land at any `await` — including partway
-        # through save_chat/touch_conversation/save_memory — and unshielded,
-        # that produces exactly the inconsistent state this whole feature
-        # exists to prevent, just from the opposite direction: a message
-        # saved via save_chat with touch_conversation never having run to
-        # title it, because the cancellation happened to land between the
-        # two calls. Once we've decided there's a complete reply to
-        # persist, persisting it is treated as atomic — all three calls
+        # through save_chat/touch_conversation/save_memory/preferences — and
+        # unshielded, that produces exactly the inconsistent state this
+        # whole feature exists to prevent, just from the opposite direction:
+        # a message saved via save_chat with touch_conversation never having
+        # run to title it, because the cancellation happened to land between
+        # the two calls. Once we've decided there's a complete reply to
+        # persist, persisting it is treated as atomic — all four calls
         # happen, or (only on a genuine internal failure, caught below)
         # none of their effects are surfaced as a successful save.
         save_failed = False
@@ -334,6 +370,7 @@ def chat_stream(
                 await run_in_threadpool(
                     touch_conversation, db, conversation_id, title=_default_title(request.message)
                 )
+                await run_in_threadpool(_learn_preferences, db, current_user, request.message, reply_data)
 
                 memory_text = build_memory_text(request.message, reply_data)
                 if memory_text:

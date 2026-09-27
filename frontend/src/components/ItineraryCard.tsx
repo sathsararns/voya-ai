@@ -1,6 +1,28 @@
 import type { ReactNode } from 'react'
-import { BookOpenIcon, CalendarIcon, MapPinIcon, MessageCircleQuestionIcon, WalletIcon } from 'lucide-react'
+import {
+  BookOpenIcon,
+  CalculatorIcon,
+  CalendarIcon,
+  CloudSunIcon,
+  CompassIcon,
+  MapPinIcon,
+  MessageCircleQuestionIcon,
+  RouteIcon,
+  WalletIcon,
+  WrenchIcon,
+} from 'lucide-react'
 import type { ChatResponse } from '../types'
+
+// Maps a backend tool name (see backend/services/tools.py's TOOL_SCHEMAS) to
+// a short human label and icon for the "Tools used" chips below. Falls back
+// to the raw name + a generic icon for a tool this map hasn't been updated
+// for yet, so an unrecognized name never disappears silently.
+const TOOL_META: Record<string, { label: string; icon: ReactNode }> = {
+  get_weather: { label: 'Weather', icon: <CloudSunIcon className="h-3.5 w-3.5" strokeWidth={2.2} /> },
+  calculate_budget: { label: 'Budget', icon: <CalculatorIcon className="h-3.5 w-3.5" strokeWidth={2.2} /> },
+  search_places: { label: 'Places', icon: <CompassIcon className="h-3.5 w-3.5" strokeWidth={2.2} /> },
+  generate_itinerary: { label: 'Itinerary', icon: <RouteIcon className="h-3.5 w-3.5" strokeWidth={2.2} /> },
+}
 
 export function ItineraryCard({ plan, fallback }: { plan: ChatResponse; fallback: string }) {
   const days = Array.isArray(plan.itinerary) ? plan.itinerary : []
@@ -87,6 +109,29 @@ export function ItineraryCard({ plan, fallback }: { plan: ChatResponse; fallback
           <MessageCircleQuestionIcon className="mt-0.5 h-4 w-4 shrink-0" strokeWidth={2.2} />
           {plan.follow_up_question}
         </p>
+      )}
+
+      {plan.tools_used && plan.tools_used.length > 0 && (
+        <div className="border-t border-line pt-3.5">
+          <p className="mb-1.5 flex items-center gap-1.5 text-[11px] font-semibold uppercase tracking-wide text-faint">
+            <WrenchIcon className="h-3 w-3" strokeWidth={2.2} />
+            Tools used
+          </p>
+          <div className="flex flex-wrap gap-1.5">
+            {plan.tools_used.map((tool) => {
+              const meta = TOOL_META[tool]
+              return (
+                <span
+                  key={tool}
+                  className="inline-flex items-center gap-1.5 rounded-full border border-line bg-canvas/70 px-2.5 py-1 text-[12px] font-medium text-ink"
+                >
+                  {meta?.icon ?? <WrenchIcon className="h-3.5 w-3.5" strokeWidth={2.2} />}
+                  {meta?.label ?? tool}
+                </span>
+              )
+            })}
+          </div>
+        </div>
       )}
 
       {plan.kb_sources && plan.kb_sources.length > 0 && (
