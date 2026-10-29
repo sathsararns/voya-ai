@@ -4,7 +4,7 @@
 // rendering the rest of the card (summary, itinerary, kb_sources,
 // follow_up_question) is unaffected either way.
 import { afterEach, describe, expect, it } from 'vitest'
-import { cleanup, render, screen } from '@testing-library/react'
+import { cleanup, render, screen, within } from '@testing-library/react'
 import '@testing-library/jest-dom/vitest'
 import { ItineraryCard } from '../src/components/ItineraryCard'
 import type { ChatResponse } from '../src/types'
@@ -24,6 +24,109 @@ const basePlan: ChatResponse = {
 }
 
 describe('ItineraryCard — Tools used chips', () => {
+  it('shows an explicitly estimated allocation with all categories and the total', () => {
+    const plan: ChatResponse = {
+      ...basePlan,
+      budget_breakdown: {
+        accommodation_lkr: 13500, food_lkr: 13500, transport_lkr: 11250,
+        activities_lkr: 4500, misc_lkr: 2250, total_lkr: 45000, is_estimate: true,
+      },
+      fee_notice: 'Entrance fees are unverified. Confirm current charges with each venue.',
+    }
+    const { rerender } = render(<ItineraryCard plan={plan} fallback={plan.summary} />)
+    const table = screen.getByRole('table', { name: 'Estimated budget allocation' })
+
+    expect(within(table).getAllByRole('row')).toHaveLength(6)
+    expect(within(table).getByText('Accommodation')).toBeInTheDocument()
+    expect(within(table).getByText('Food')).toBeInTheDocument()
+    expect(within(table).getByText('11,250 LKR')).toBeInTheDocument()
+    expect(within(table).getByText('45,000 LKR')).toBeInTheDocument()
+    expect(screen.getByText(/Planning allowances/)).toBeInTheDocument()
+    expect(screen.getByText(plan.fee_notice!)).toBeInTheDocument()
+
+    // Saved history from before this feature remains readable.
+    rerender(<ItineraryCard plan={basePlan} fallback={basePlan.summary} />)
+    expect(screen.queryByRole('table')).not.toBeInTheDocument()
+  })
+
+  it('types the budget rows in order before the fee notice and follow-up', () => {
+    const plan: ChatResponse = {
+      ...basePlan, itinerary: [],
+      budget_breakdown: {
+        accommodation_lkr: 13500, food_lkr: 13500, transport_lkr: 11250,
+        activities_lkr: 4500, misc_lkr: 2250, total_lkr: 45000, is_estimate: true,
+      },
+      fee_notice: 'Entrance fees are unverified.',
+    }
+    const limit = 'Estimated budget allocation'.length
+      + 'Planning allowances. Confirm actual prices for your dates, travellers and nights.'.length
+      + 'Accommodation'.length + 3
+    const { rerender } = render(
+      <ItineraryCard plan={plan} fallback={plan.summary} revealCharacters={limit} />,
+    )
+
+    const table = screen.getByRole('table', { name: 'Estimated budget allocation' })
+    expect(within(table).getByText('13,')).toBeInTheDocument()
+    expect(within(table).queryByText('Food')).not.toBeInTheDocument()
+    expect(screen.queryByText(plan.fee_notice!)).not.toBeInTheDocument()
+    expect(screen.queryByText(plan.follow_up_question!)).not.toBeInTheDocument()
+
+    rerender(<ItineraryCard plan={plan} fallback={plan.summary} />)
+    expect(screen.getByText(plan.fee_notice!)).toBeInTheDocument()
+    expect(screen.getByText(plan.follow_up_question!)).toBeInTheDocument()
+  })
+
+  it('reveals titles and bullets in order without showing later days early', () => {
+    const plan: ChatResponse = {
+      ...basePlan,
+      itinerary: [
+        { day: 1, title: 'Arrival', items: ['Board the train', 'Check in'] },
+        { day: 2, title: 'Explore', items: ['Visit the gardens'] },
+      ],
+      tools_used: ['get_weather'],
+    }
+    const { rerender } = render(
+      <ItineraryCard plan={plan} fallback={plan.summary} revealCharacters={2} />,
+    )
+
+    expect(screen.getByText(plan.summary)).toBeInTheDocument()
+    expect(screen.getByText('Da')).toBeInTheDocument()
+    expect(screen.queryByText('Arrival')).not.toBeInTheDocument()
+    expect(screen.queryByText('Day 2')).not.toBeInTheDocument()
+
+    // Day label + title + only the first three characters of the first bullet.
+    rerender(<ItineraryCard plan={plan} fallback={plan.summary} revealCharacters={15} />)
+    expect(screen.getByText('Arrival')).toBeInTheDocument()
+    expect(screen.getByText('Boa')).toBeInTheDocument()
+    expect(screen.queryByText('Board the train')).not.toBeInTheDocument()
+    expect(screen.queryByText('Check in')).not.toBeInTheDocument()
+    expect(screen.queryByText('Day 2')).not.toBeInTheDocument()
+    expect(screen.queryByText(plan.follow_up_question!)).not.toBeInTheDocument()
+    expect(screen.queryByText('Tools used')).not.toBeInTheDocument()
+
+    rerender(<ItineraryCard plan={plan} fallback={plan.summary} />)
+    expect(screen.getByText('Board the train')).toBeInTheDocument()
+    expect(screen.getByText('Check in')).toBeInTheDocument()
+    expect(screen.getByText('Day 2')).toBeInTheDocument()
+    expect(screen.getByText('Visit the gardens')).toBeInTheDocument()
+    expect(screen.getByText(plan.follow_up_question!)).toBeInTheDocument()
+    expect(screen.getByText('Tools used')).toBeInTheDocument()
+  })
+
+  it('types the follow-up question after all itinerary text', () => {
+    const plan: ChatResponse = {
+      summary: 'Here is your plan.',
+      itinerary: [{ day: 1, title: 'Arrive', items: ['Rest'] }],
+      follow_up_question: 'Want more ideas?',
+    }
+    // "Day 1" (5) + "Arrive" (6) + "Rest" (4) + "Want" (4).
+    render(<ItineraryCard plan={plan} fallback={plan.summary} revealCharacters={19} />)
+
+    expect(screen.getByText('Rest')).toBeInTheDocument()
+    expect(screen.getByText('Want')).toBeInTheDocument()
+    expect(screen.queryByText('Want more ideas?')).not.toBeInTheDocument()
+  })
+
   it('shows a "Tools used" section with a labeled, icon chip for each tool when tools_used is populated', () => {
     const plan: ChatResponse = {
       ...basePlan,
@@ -88,7 +191,7 @@ describe('ItineraryCard — Tools used chips', () => {
     expect(screen.getByText('A relaxed 3 day trip to Kandy.')).toBeInTheDocument()
     expect(screen.getByText('Day 1')).toBeInTheDocument()
     expect(screen.getByText('Would you like hotel recommendations too?')).toBeInTheDocument()
-    expect(screen.getByText('Travel knowledge used')).toBeInTheDocument()
+    expect(screen.getByRole('region', { name: 'Sources' })).toBeInTheDocument()
 
     // The new section, alongside them.
     expect(screen.getByText('Tools used')).toBeInTheDocument()
@@ -102,6 +205,6 @@ describe('ItineraryCard — Tools used chips', () => {
 
     expect(screen.getByText('Hi! How can I help you plan your trip?')).toBeInTheDocument()
     expect(screen.queryByText('Tools used')).not.toBeInTheDocument()
-    expect(screen.queryByText('Travel knowledge used')).not.toBeInTheDocument()
+    expect(screen.queryByRole('region', { name: 'Sources' })).not.toBeInTheDocument()
   })
 })

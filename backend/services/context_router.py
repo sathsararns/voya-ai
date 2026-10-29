@@ -16,6 +16,7 @@ produced. See decide_context_strategy() for the entry point.
 """
 
 from dataclasses import dataclass, field
+import re
 from typing import List
 
 
@@ -41,10 +42,11 @@ class ContextDecision:
     candidate_tools: List[str] = field(default_factory=list)
 
 
-# Short greetings/acknowledgements — never worth any retrieval.
+# Standalone social greetings. Replies such as "okay" and "sure" may
+# accept an offer in the previous turn, so they still need history.
 GREETING_KEYWORDS = {
     "hi", "hello", "hey", "yo", "good morning", "good afternoon", "good evening",
-    "thanks", "thank you", "ok", "okay", "sure", "bye", "goodbye", "cool", "nice",
+    "thanks", "thank you", "bye", "goodbye",
 }
 
 # Statements about the user's own tastes — exactly what Pinecone memory
@@ -118,6 +120,16 @@ def _contains_any(text: str, phrases: set) -> bool:
     return any(phrase in text for phrase in phrases)
 
 
+def is_options_request(user_message: str) -> bool:
+    """Travel alternatives are not a request for one selected itinerary."""
+    text = user_message.lower()
+    return bool(re.search(
+        r"\b(?:travel|trip|tour|destination|itinerary|holiday|vacation)\s+(?:options|alternatives)\b"
+        r"|\b(?:give|show|list|suggest|offer)(?:\s+me)?(?:\s+some|\s+a few)?\s+options\b",
+        text,
+    ))
+
+
 def decide_context_strategy(user_message: str, conversation_message_count: int) -> ContextDecision:
     """Classify a user message and decide which context sources to fetch.
 
@@ -130,7 +142,8 @@ def decide_context_strategy(user_message: str, conversation_message_count: int) 
     word_count = len(text.split())
     has_prior_history = conversation_message_count > 0
 
-    is_greeting = word_count <= 4 and _contains_any(text, GREETING_KEYWORDS)
+    # Match the whole greeting: "hi" must not match "which" or "this".
+    is_greeting = text.strip(" .!?,") in GREETING_KEYWORDS
     is_short_command = word_count <= 2 and not is_greeting
     is_preference = _contains_any(text, PREFERENCE_KEYWORDS)
     is_followup = _contains_any(text, FOLLOWUP_KEYWORDS)
@@ -148,16 +161,11 @@ def decide_context_strategy(user_message: str, conversation_message_count: int) 
         and not is_short_command
     )
 
-    # --- conversation history: only if the conversation actually has prior
-    # turns, and only if this message plausibly builds on them (a follow-up
-    # edit, or a planning request substantial enough to likely reference
-    # earlier context).
-    use_conversation_history = (
-        has_prior_history
-        and (is_followup or is_planning)
-        and not is_greeting
-        and not is_short_command
-    )
+    # Recent turns are the default for an ongoing conversation. A brief
+    # reply ("2", "I choose 2", "yes", "give options") can depend entirely
+    # on the previous offer even without a planning/follow-up keyword.
+    # build_context keeps this bounded to the existing recent-turn window.
+    use_conversation_history = has_prior_history and not is_greeting
 
     # --- preferred shape of that history, if used: a precise follow-up
     # ("change day 3") needs the exact prior turn, not a lossy summary; a
@@ -190,7 +198,12 @@ def decide_context_strategy(user_message: str, conversation_message_count: int) 
         if _contains_any(text, ITINERARY_TOOL_KEYWORDS):
             candidate_tools.append("generate_itinerary")
 
-    if is_greeting or is_short_command:
+    if is_options_request(user_message) and "generate_itinerary" in candidate_tools:
+        candidate_tools.remove("generate_itinerary")
+
+    if use_conversation_history and is_short_command:
+        route_reason = "short_reply_uses_conversation_history"
+    elif is_greeting or is_short_command:
         route_reason = "greeting_or_short_command_no_retrieval"
     elif use_conversation_history and use_pinecone_memory:
         route_reason = "complex_planning_uses_history_and_memory"

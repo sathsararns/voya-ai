@@ -1,5 +1,6 @@
 import { create } from 'zustand'
 import { api, ApiAbortError, ApiNetworkError, ApiRequestError, streamPost } from '../lib/api'
+import { getItineraryRevealText } from '../lib/itineraryReveal'
 import { useAuthStore } from './useAuthStore'
 import type {
   ChatHistoryResponse,
@@ -491,11 +492,9 @@ export const useAppStore = create<AppState>((set, get) => ({
     // used to do) doesn't extend whatever prose the typewriter had reached;
     // it REPLACES it with a longer, differently-shaped string in one frame,
     // which reads as the reply suddenly finishing itself mid-animation.
-    // Instead, `done` only updates what the ticker is typing toward (the
-    // authoritative summary text — see onDone below) and keeps it running;
-    // finalizeMessage (attaching the structured `plan`, which is what
-    // switches ChatThread.tsx over to the itinerary card) only ever runs
-    // once the ticker has actually reached the end of that text on its own.
+    // After `done`, the target includes both summary and itinerary details.
+    // Once the summary is visible, the same timer reveals the structured
+    // card in display order, finishing only after every detail is shown.
     let targetText = ''
     let revealedLength = 0
     let typewriterTimer: ReturnType<typeof setTimeout> | null = null
@@ -513,7 +512,7 @@ export const useAppStore = create<AppState>((set, get) => ({
       }
     }
 
-    // Attaches the structured plan and flips the message out of "streaming"
+    // Completes the structured plan and flips the message out of "streaming"
     // — the ONE place that happens, so it's impossible for it to run twice
     // (guarded by `finalized`) regardless of which of revealTick/onDone/
     // stopGenerating's skip-to-end path gets there first.
@@ -526,7 +525,7 @@ export const useAppStore = create<AppState>((set, get) => ({
         isResponding: false,
         messages: state.messages.map((m) =>
           m.id === `a-${stamp}`
-            ? { ...m, pending: false, streaming: false, content: assistantText, plan: data }
+            ? { ...m, pending: false, streaming: false, content: assistantText, plan: data, planRevealCharacters: undefined }
             : m,
         ),
       }))
@@ -547,7 +546,10 @@ export const useAppStore = create<AppState>((set, get) => ({
       const nextLength = Math.min(targetText.length, revealedLength + TYPEWRITER_CHARS_PER_TICK)
       const revealedChunk = targetText.slice(revealedLength, nextLength)
       revealedLength = nextLength
-      const visibleText = targetText.slice(0, revealedLength)
+      const summaryLength = doneData?.summary.length ?? targetText.length
+      const visibleText = targetText.slice(0, Math.min(revealedLength, summaryLength))
+      const detailsVisible = doneData !== null && revealedLength > summaryLength
+      const plan = detailsVisible ? (doneData ?? undefined) : undefined
       set((state) => ({
         messages: state.messages.map((m) =>
           // Only ever flips pending -> false on the FIRST tick that
@@ -555,7 +557,14 @@ export const useAppStore = create<AppState>((set, get) => ({
           // visible for the brief instant between "a token event arrived"
           // and "the typewriter has revealed its first character", instead
           // of a blank frame in between.
-          m.id === `a-${stamp}` ? { ...m, pending: false, streaming: true, content: visibleText } : m,
+          m.id === `a-${stamp}` ? {
+            ...m,
+            pending: false,
+            streaming: true,
+            content: visibleText,
+            plan,
+            planRevealCharacters: detailsVisible ? revealedLength - summaryLength : undefined,
+          } : m,
         ),
       }))
 
@@ -638,18 +647,10 @@ export const useAppStore = create<AppState>((set, get) => ({
               }))
             }
 
-            // `done`'s authoritative summary (it may differ slightly from
-            // the raw streamed text if a validation retry corrected it
-            // server-side) becomes the new thing the ticker is typing
-            // toward — NOT an instant replacement of `content`. If the
-            // ticker had already typed further than this text is long
-            // (unusual, but possible after a correction), clamp back so the
-            // next tick continues from a valid position instead of reading
-            // past the end of the new target.
-            targetText = data.summary
-            if (revealedLength > targetText.length) {
-              revealedLength = targetText.length
-            }
+            // Continue from streamed prose into each day and bullet using
+            // one character budget. No itinerary text appears ahead of it.
+            revealedLength = Math.min(revealedLength, data.summary.length)
+            targetText = data.summary + getItineraryRevealText(data)
 
             if (revealedLength >= targetText.length) {
               // Already fully typed out (e.g. an empty summary, or the

@@ -713,6 +713,82 @@ describe('typewriter reveal — streamed text builds up character-by-character',
     vi.useRealTimers()
   })
 
+  it('continues typing the itinerary after the summary and finishes only after all details', async () => {
+    vi.useFakeTimers()
+    const plan = {
+      summary: 'Hi',
+      itinerary: [
+        { day: 1, title: 'Arrival', items: ['Board the train', 'Check in'] },
+        { day: 2, title: 'Explore', items: ['Visit the gardens'] },
+      ],
+      follow_up_question: 'Want hotel ideas?',
+      conversation_id: 'conv-1',
+    }
+    global.fetch = vi.fn()
+      .mockResolvedValueOnce(sseDone(plan))
+      .mockResolvedValue(jsonResponse({ conversations: [] })) as unknown as typeof fetch
+
+    const revealCounts: number[] = []
+    const unsubscribe = useAppStore.subscribe((state) => {
+      const message = state.messages.find((m) => m.role === 'assistant')
+      if (message?.planRevealCharacters !== undefined) {
+        revealCounts.push(message.planRevealCharacters)
+      }
+    })
+    const sendPromise = useAppStore.getState().send('Plan a trip')
+    await vi.advanceTimersByTimeAsync(0)
+    await vi.advanceTimersByTimeAsync(TYPEWRITER_INTERVAL_MS * 2)
+
+    const partial = useAppStore.getState().messages.find((m) => m.role === 'assistant')
+    expect(partial?.content).toBe('Hi')
+    expect(partial?.plan).toEqual(plan)
+    expect(partial?.planRevealCharacters).toBe(2)
+    expect(partial?.streaming).toBe(true)
+    expect(useAppStore.getState().isResponding).toBe(true)
+
+    await vi.runAllTimersAsync()
+    await sendPromise
+    unsubscribe()
+
+    const completed = useAppStore.getState().messages.find((m) => m.role === 'assistant')
+    expect(completed?.plan).toEqual(plan)
+    expect(completed?.planRevealCharacters).toBeUndefined()
+    expect(completed?.streaming).toBe(false)
+    expect(useAppStore.getState().isResponding).toBe(false)
+    expect(revealCounts.length).toBeGreaterThan(2)
+    for (let i = 1; i < revealCounts.length; i++) {
+      expect(revealCounts[i] - revealCounts[i - 1]).toBeLessThanOrEqual(TYPEWRITER_CHARS_PER_TICK)
+    }
+    expect(vi.getTimerCount()).toBe(0)
+  })
+
+  it('lets Stop finish a partially typed itinerary with an empty summary', async () => {
+    vi.useFakeTimers()
+    const plan = {
+      summary: '',
+      itinerary: [{ day: 1, title: 'Arrival', items: ['Board the train', 'Check in'] }],
+      conversation_id: 'conv-1',
+    }
+    global.fetch = vi.fn()
+      .mockResolvedValueOnce(sseDone(plan))
+      .mockResolvedValue(jsonResponse({ conversations: [] })) as unknown as typeof fetch
+
+    const sendPromise = useAppStore.getState().send('Plan a trip')
+    await vi.advanceTimersByTimeAsync(0)
+    await vi.advanceTimersByTimeAsync(TYPEWRITER_INTERVAL_MS)
+    expect(useAppStore.getState().messages.find((m) => m.role === 'assistant')?.planRevealCharacters).toBe(2)
+
+    useAppStore.getState().stopGenerating()
+    await sendPromise
+
+    const completed = useAppStore.getState().messages.find((m) => m.role === 'assistant')
+    expect(completed?.plan).toEqual(plan)
+    expect(completed?.planRevealCharacters).toBeUndefined()
+    expect(completed?.stopped).toBeUndefined()
+    expect(useAppStore.getState().isResponding).toBe(false)
+    expect(vi.getTimerCount()).toBe(0)
+  })
+
   it('reveals a streamed token a few characters at a time, not all at once', async () => {
     vi.useFakeTimers()
 

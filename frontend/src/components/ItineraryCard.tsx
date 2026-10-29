@@ -1,6 +1,5 @@
 import type { ReactNode } from 'react'
 import {
-  BookOpenIcon,
   CalculatorIcon,
   CalendarIcon,
   CloudSunIcon,
@@ -12,6 +11,8 @@ import {
   WrenchIcon,
 } from 'lucide-react'
 import type { ChatResponse } from '../types'
+import { getVisibleItinerary } from '../lib/itineraryReveal'
+import { SourceReferences } from './SourceReferences'
 
 // Maps a backend tool name (see backend/services/tools.py's TOOL_SCHEMAS) to
 // a short human label and icon for the "Tools used" chips below. Falls back
@@ -24,8 +25,13 @@ const TOOL_META: Record<string, { label: string; icon: ReactNode }> = {
   generate_itinerary: { label: 'Itinerary', icon: <RouteIcon className="h-3.5 w-3.5" strokeWidth={2.2} /> },
 }
 
-export function ItineraryCard({ plan, fallback }: { plan: ChatResponse; fallback: string }) {
-  const days = Array.isArray(plan.itinerary) ? plan.itinerary : []
+export function ItineraryCard({ plan, fallback, revealCharacters }: {
+  plan: ChatResponse
+  fallback: string
+  revealCharacters?: number
+}) {
+  const { days, budgetHeading, budgetNote, budgetRows, feeNotice, followUpQuestion } = getVisibleItinerary(plan, revealCharacters)
+  const revealing = revealCharacters !== undefined
 
   // Built as a list (rather than adjacent JSX chips) so a real separator can
   // be placed *between* entries. CSS `gap` alone only creates visual space —
@@ -87,8 +93,8 @@ export function ItineraryCard({ plan, fallback }: { plan: ChatResponse; fallback
         <ol className="space-y-2.5">
           {days.map((day) => (
             <li key={day.day} className="rounded-xl border border-line bg-canvas/70 p-3.5">
-              <p className="text-[12px] font-bold uppercase tracking-wider text-ink">Day {day.day}</p>
-              <p className="mt-0.5 text-[14px] font-semibold text-ink">{day.title}</p>
+              <p className="text-[12px] font-bold uppercase tracking-wider text-ink">{day.label}</p>
+              {day.title && <p className="mt-0.5 text-[14px] font-semibold text-ink">{day.title}</p>}
               {Array.isArray(day.items) && day.items.length > 0 && (
                 <ul className="mt-2 space-y-1.5">
                   {day.items.map((item, i) => (
@@ -104,14 +110,35 @@ export function ItineraryCard({ plan, fallback }: { plan: ChatResponse; fallback
         </ol>
       )}
 
-      {plan.follow_up_question && (
+      {budgetHeading && (
+        <section className="rounded-xl border border-line bg-canvas/70 p-3.5">
+          <h3 className="text-[14px] font-semibold text-ink">{budgetHeading}</h3>
+          {budgetNote && <p className="mt-1 text-[12.5px] leading-5 text-muted">{budgetNote}</p>}
+          {budgetRows.length > 0 && (
+            <table aria-label="Estimated budget allocation" className="mt-3 w-full text-[13.5px]">
+              <tbody>
+                {budgetRows.map((row) => (
+                  <tr key={row.id} className={row.id === 'total' ? 'border-t border-line font-semibold text-ink' : 'text-muted'}>
+                    <th scope="row" className="py-1.5 text-left [font-weight:inherit]">{row.label}</th>
+                    <td className="py-1.5 text-right tabular-nums">{row.value}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          )}
+        </section>
+      )}
+
+      {feeNotice && <p className="text-[12.5px] leading-5 text-muted">{feeNotice}</p>}
+
+      {followUpQuestion && (
         <p className="flex items-start gap-2 rounded-xl bg-teal-soft px-3.5 py-2.5 text-[13.5px] font-medium text-teal">
           <MessageCircleQuestionIcon className="mt-0.5 h-4 w-4 shrink-0" strokeWidth={2.2} />
-          {plan.follow_up_question}
+          {followUpQuestion}
         </p>
       )}
 
-      {plan.tools_used && plan.tools_used.length > 0 && (
+      {!revealing && plan.tools_used && plan.tools_used.length > 0 && (
         <div className="border-t border-line pt-3.5">
           <p className="mb-1.5 flex items-center gap-1.5 text-[11px] font-semibold uppercase tracking-wide text-faint">
             <WrenchIcon className="h-3 w-3" strokeWidth={2.2} />
@@ -134,31 +161,7 @@ export function ItineraryCard({ plan, fallback }: { plan: ChatResponse; fallback
         </div>
       )}
 
-      {plan.kb_sources && plan.kb_sources.length > 0 && (
-        <div className="border-t border-line pt-3.5">
-          <p className="mb-1.5 flex items-center gap-1.5 text-[11px] font-semibold uppercase tracking-wide text-faint">
-            <BookOpenIcon className="h-3 w-3" strokeWidth={2.2} />
-            Travel knowledge used
-          </p>
-          <ul className="space-y-1">
-            {plan.kb_sources.map((source, i) => (
-              <li
-                key={`${source.document_name}-${source.chunk_index ?? i}`}
-                title={source.snippet}
-                className="truncate text-[12.5px] text-muted"
-              >
-                <span className="font-medium text-ink">{source.title}</span>
-                {typeof source.chunk_index === 'number' && (
-                  <span className="text-faint"> · chunk {source.chunk_index}</span>
-                )}
-                {typeof source.score === 'number' && (
-                  <span className="text-faint"> · {Math.round(source.score * 100)}% match</span>
-                )}
-              </li>
-            ))}
-          </ul>
-        </div>
-      )}
+      {!revealing && <SourceReferences sources={plan.kb_sources ?? []} />}
     </div>
   )
 }

@@ -42,10 +42,23 @@ class KBSource(BaseModel):
     snippet: str
 
 
+class BudgetBreakdown(BaseModel):
+    accommodation_lkr: int
+    food_lkr: int
+    transport_lkr: int
+    activities_lkr: int
+    misc_lkr: int
+    total_lkr: int
+    is_estimate: bool = True
+
+
 class ChatResponse(BaseModel):
     destination: Optional[str] = None
     days: Optional[int] = None
     budget_lkr: Optional[int] = None
+    budget_cap_lkr: Optional[int] = None
+    budget_breakdown: Optional[BudgetBreakdown] = None
+    fee_notice: Optional[str] = None
     summary: str
     itinerary: List[ItineraryDay] = Field(default_factory=list)
     follow_up_question: Optional[str] = None

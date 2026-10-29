@@ -58,7 +58,11 @@ export function ChatThread() {
               {message.pending ? (
                 <TypingDots />
               ) : message.plan ? (
-                <ItineraryCard plan={message.plan} fallback={message.content} />
+                <ItineraryCard
+                  plan={message.plan}
+                  fallback={message.content}
+                  revealCharacters={message.planRevealCharacters}
+                />
               ) : (
                 <>
                   {message.content && (

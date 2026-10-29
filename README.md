@@ -1,6 +1,6 @@
 # Voya AI — Travel Copilot Platform
 
-Voya AI is a full-stack AI travel assistant. Users chat in natural language and get back personalized, day-by-day trip itineraries, with the assistant able to pull in live weather, budget, and points-of-interest data, remember a user's travel preferences across sessions, and stream its replies back token-by-token in real time.
+Voya AI is a full-stack AI travel assistant. Users chat in natural language and get personalized, day-by-day trip itineraries grounded in travel documents, seasonal climate references and estimated budget allocations. The assistant remembers travel preferences across sessions and progressively reveals validated replies in the chat interface.
 
 ## Tech Stack
 
@@ -114,8 +114,12 @@ npm test
 
 ## Key Features
 
-- Real-time streaming chat responses (Server-Sent Events) with a typewriter-style reveal
-- LLM function-calling for live weather, budget, and places data
+- SSE chat delivery with a typewriter reveal for validated summaries, itineraries and budget allocations; validation finishes before text becomes visible
+- LLM function-calling for seasonal climate references, estimated budgets, and knowledge-base places
+- Hard total budget caps, exact category allocations, and explicit notices that admission fees and actual prices need confirmation
+- A single server-calculated budget breakdown; generated itinerary prose does not invent separate meal, hotel or transfer quotes
+- Sourced venue-location checks for a small curated catalogue, with corrections that preserve requested stops
+- Attraction-addition edits compare named visits with the previous itinerary so unchanged or merely reworded plans are rejected
 - Retrieval-augmented itinerary suggestions from a Pinecone-backed travel knowledge base
 - Persistent, per-account travel-preferences memory (destinations, budget, hotel/transport/food style)
 - JWT + CSRF-protected authentication with Redis-backed rate limiting and session revocation

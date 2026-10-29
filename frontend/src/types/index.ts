@@ -14,10 +14,23 @@ export interface KBSource {
   snippet: string
 }
 
+export interface BudgetBreakdown {
+  accommodation_lkr: number
+  food_lkr: number
+  transport_lkr: number
+  activities_lkr: number
+  misc_lkr: number
+  total_lkr: number
+  is_estimate: boolean
+}
+
 export interface ChatResponse {
   destination?: string | null
   days?: number | null
   budget_lkr?: number | null
+  budget_cap_lkr?: number | null
+  budget_breakdown?: BudgetBreakdown | null
+  fee_notice?: string | null
   summary: string
   itinerary?: ItineraryDay[]
   follow_up_question?: string | null
@@ -42,9 +55,11 @@ export interface Message {
   // True while an assistant message's text is still arriving token-by-token
   // (see useAppStore.ts's send() and lib/api.ts's streamPost) — distinct
   // from `pending`, which covers the earlier window before the first token
-  // has arrived at all. Never true at the same time as `plan` being set:
-  // `plan` only appears once the full reply (and therefore streaming) is done.
+  // has arrived at all. Also true while the itinerary is being revealed.
   streaming?: boolean
+  // Present only while typing a new plan's details after its summary.
+  // Omitted for completed replies and loaded history, which render in full.
+  planRevealCharacters?: number
   // Set once, permanently, when the user clicked Stop mid-generation (see
   // useAppStore.ts's stopGenerating/send()). `content` is left exactly as
   // it was at that moment — whatever text had already streamed in, or none

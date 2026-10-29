@@ -1,4 +1,4 @@
-import { useRef, useState } from 'react'
+import { useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react'
 import { motion } from 'framer-motion'
 import { SendHorizontalIcon, SquareIcon } from 'lucide-react'
 import voyaLogo from '../assets/voya-logo.jpg'
@@ -10,6 +10,37 @@ export function Composer({ compact = false }: { compact?: boolean }) {
   const send = useAppStore((s) => s.send)
   const stopGenerating = useAppStore((s) => s.stopGenerating)
   const isResponding = useAppStore((s) => s.isResponding)
+
+  const resizeInput = useCallback(() => {
+    const input = inputRef.current
+    if (!input) return
+    const lineHeight = 24 // Matches leading-6 below.
+    const minimumHeight = lineHeight * (compact ? 1 : 2)
+    const maximumHeight = lineHeight * 3
+
+    // Reset before measuring so deleting text also shrinks the composer.
+    input.style.height = '0px'
+    const contentHeight = input.scrollHeight
+    input.style.height = `${Math.min(maximumHeight, Math.max(minimumHeight, contentHeight))}px`
+    input.style.overflowY = contentHeight > maximumHeight ? 'auto' : 'hidden'
+  }, [compact])
+
+  useLayoutEffect(() => {
+    resizeInput()
+  }, [value, resizeInput])
+
+  useEffect(() => {
+    const input = inputRef.current
+    if (!input || typeof ResizeObserver === 'undefined') return
+    let previousWidth: number | null = null
+    const observer = new ResizeObserver(([entry]) => {
+      if (!entry || entry.contentRect.width === previousWidth) return
+      previousWidth = entry.contentRect.width
+      resizeInput()
+    })
+    observer.observe(input)
+    return () => observer.disconnect()
+  }, [resizeInput])
 
   const submit = () => {
     if (!value.trim() || isResponding) return
@@ -34,16 +65,17 @@ export function Composer({ compact = false }: { compact?: boolean }) {
           id="composer"
           ref={inputRef}
           rows={compact ? 1 : 2}
+          wrap="soft"
           value={value}
           onChange={(e) => setValue(e.target.value)}
           onKeyDown={(e) => {
-            if (e.key === 'Enter' && !e.shiftKey) {
+            if (e.key === 'Enter' && !e.shiftKey && !e.nativeEvent.isComposing) {
               e.preventDefault()
               submit()
             }
           }}
           placeholder="Initiate a query or send a command to the AI..."
-          className="w-full resize-none bg-transparent text-[15px] leading-6 text-ink outline-none placeholder:text-faint"
+          className="block min-w-0 w-full resize-none overflow-y-hidden bg-transparent text-[15px] leading-6 text-ink outline-none placeholder:text-faint"
         />
       </div>
 

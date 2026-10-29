@@ -112,8 +112,8 @@ def chat(
 
     # Agentic RAG decision layer: figure out which context sources this
     # message actually needs BEFORE touching the DB/Pinecone for them, so a
-    # greeting or a one-word command skips retrieval entirely instead of
-    # paying for it and throwing the result away.
+    # standalone greeting can skip retrieval while a short choice keeps
+    # the recent conversation needed to understand it.
     message_count = count_conversation_messages(db, conversation_id)
     decision = decide_context_strategy(request.message, message_count)
     print(
@@ -189,9 +189,9 @@ def chat_stream(
     """Same request/response contract as POST / (same auth, same ownership,
     same final saved message), delivered as Server-Sent Events instead of a
     single JSON body — so the frontend can render the assistant's reply
-    token-by-token as the model generates it (see json_utils's
-    SummaryStreamExtractor and services/groq_service.stream_groq_reply)
-    instead of waiting for the whole thing.
+    progressively using the frontend typewriter. Model text is held until
+    budget and fee validation completes (services/groq_service.py), so
+    unsupported claims never appear temporarily before being corrected.
 
     Event stream contract:
       event: token   data: {"text": "..."}   — zero or more, visible text as

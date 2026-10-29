@@ -155,6 +155,15 @@ def _coerce_itinerary(raw_itinerary: Any) -> List[Dict[str, Any]]:
             continue
 
         items = entry.get("items", [])
+        if isinstance(items, str):
+            # Some answers serialize an entire list into a single string.
+            # Decode only a real JSON array; preserve ordinary quoted prose.
+            try:
+                decoded_items = json.loads(items)
+            except (json.JSONDecodeError, TypeError):
+                decoded_items = None
+            if isinstance(decoded_items, list):
+                items = decoded_items
         if not isinstance(items, list):
             items = [items] if items else []
 

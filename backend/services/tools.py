@@ -30,6 +30,7 @@ the turn.
 from typing import Any, Callable, Dict, List, Optional
 
 from services.kb_rag import search_knowledge_base
+from services.budget import calculate_budget
 
 # --- get_weather --------------------------------------------------------
 #
@@ -245,48 +246,6 @@ def search_places(destination: str, category: Optional[str] = None, limit: int =
 
 
 # --- calculate_budget ------------------------------------------------------
-
-DAILY_BUDGET_LKR_BY_STYLE: Dict[str, int] = {
-    "budget": 8_000,
-    "mid-range": 18_000,
-    "luxury": 45_000,
-}
-
-BREAKDOWN_PERCENTAGES_BY_STYLE: Dict[str, Dict[str, float]] = {
-    "budget": {"accommodation": 0.30, "food": 0.30, "transport": 0.25, "activities": 0.10, "misc": 0.05},
-    "mid-range": {"accommodation": 0.35, "food": 0.25, "transport": 0.20, "activities": 0.15, "misc": 0.05},
-    "luxury": {"accommodation": 0.45, "food": 0.20, "transport": 0.15, "activities": 0.15, "misc": 0.05},
-}
-
-
-def calculate_budget(
-    days: int, total_budget_lkr: Optional[int] = None, travel_style: Optional[str] = None
-) -> Dict[str, Any]:
-    """Deterministic day-by-day LKR budget breakdown — pure arithmetic, no
-    external data needed. If the user gave a total, it's split by category;
-    otherwise a per-day reference amount for the chosen style estimates one.
-    """
-    days = max(1, min(int(days), 60))
-    style = (travel_style or "mid-range").strip().lower()
-    if style not in DAILY_BUDGET_LKR_BY_STYLE:
-        style = "mid-range"
-
-    if total_budget_lkr is not None and total_budget_lkr > 0:
-        total = int(total_budget_lkr)
-    else:
-        total = DAILY_BUDGET_LKR_BY_STYLE[style] * days
-
-    percentages = BREAKDOWN_PERCENTAGES_BY_STYLE[style]
-    breakdown_lkr = {f"{category}_lkr": round(total * pct) for category, pct in percentages.items()}
-
-    return {
-        "days": days,
-        "travel_style": style,
-        "total_budget_lkr": total,
-        "daily_budget_lkr": round(total / days),
-        "breakdown_lkr": breakdown_lkr,
-    }
-
 
 # --- generate_itinerary ----------------------------------------------------
 

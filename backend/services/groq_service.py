@@ -2,23 +2,110 @@ import json
 import os
 from typing import Dict, Iterator, List, Optional, Tuple
 
-from groq import Groq
+from groq import BadRequestError, Groq
 from dotenv import load_dotenv
 
-from json_utils import SummaryStreamExtractor, normalize_chat_response
+from json_utils import normalize_chat_response
 from pinecone_memory import format_memory_context
 from services.kb_rag import build_kb_sources, format_kb_context, search_knowledge_base
 from services.response_validator import validate_ai_response
 from services.tools import TOOL_SCHEMAS, execute_tool_call
 from services.user_preferences import format_preferences_context
+from services.context_router import is_options_request
+from services.budget import BUDGET_PRESENTATION_INSTRUCTION, attach_budget_details, resolve_budget_cap
+from services.fee_policy import FEE_INSTRUCTION, FEE_NOTICE
+from services.venue_facts import venue_location_context
+from services.itinerary_edits import addition_prompt_context
 
 load_dotenv()
 
 GROQ_MODEL = "openai/gpt-oss-120b"
+MAX_COMPLETION_TOKENS = 4096
+
+# Strict output is used for non-streamed generation and recovery. The
+# streaming call keeps JSON mode because Groq's strict mode cannot stream.
+CHAT_RESPONSE_FORMAT = {
+    "type": "json_schema",
+    "json_schema": {
+        "name": "travel_reply",
+        "strict": True,
+        "schema": {
+            "type": "object",
+            "additionalProperties": False,
+            "properties": {
+                "destination": {"type": ["string", "null"]},
+                "days": {"type": ["integer", "null"]},
+                "budget_lkr": {"type": ["integer", "null"]},
+                "summary": {"type": "string"},
+                "itinerary": {
+                    "type": "array",
+                    "items": {
+                        "type": "object",
+                        "additionalProperties": False,
+                        "properties": {
+                            "day": {"type": "integer"},
+                            "title": {"type": "string"},
+                            "items": {"type": "array", "items": {"type": "string"}},
+                        },
+                        "required": ["day", "title", "items"],
+                    },
+                },
+                "follow_up_question": {"type": ["string", "null"]},
+            },
+            "required": ["destination", "days", "budget_lkr", "summary", "itinerary", "follow_up_question"],
+        },
+    },
+}
+
+FINAL_ANSWER_INSTRUCTION = (
+    "Tool execution is complete for this turn. Use the supplied results "
+    "and conversation to write the final JSON answer. Do not call tools, "
+    "emit function calls, or request additional tool execution. "
+    "Each itinerary activity must be a separate plain string in items; "
+    "never put a serialized JSON list or array delimiters inside a string."
+    " Treat any stated total budget as a hard maximum. Category allocations "
+    "are estimates, not verified quotes. Do not invent free entry or discounts."
+    + "\n" + BUDGET_PRESENTATION_INSTRUCTION
+)
+
+GENERATION_FAILURE_MESSAGE = "I couldn't finish that response. Please try your request again."
+
+
+class IncompleteGenerationError(ValueError):
+    """Generation hit its output limit before a complete answer was ready."""
+
+
+def _can_retry_generation(error: Exception) -> bool:
+    if isinstance(error, (IncompleteGenerationError, json.JSONDecodeError)):
+        return True
+    if not isinstance(error, BadRequestError):
+        return False
+    body = error.body if isinstance(error.body, dict) else {}
+    details = body.get("error", body)
+    code = details.get("code") if isinstance(details, dict) else None
+    return code in {"tool_use_failed", "json_validate_failed"} or (
+        "tool choice is none" in str(error).lower()
+    )
+
+CONVERSATION_CONTEXT_RULES = (
+    "Use recent conversation turns to resolve short replies and references. "
+    "Resolve numbered or ordinal selections such as 'I choose 2', 'option 3', "
+    "'2', or 'the second one' to the matching option from the most recent "
+    "travel options you offered. "
+    "An option number is not a number of trip days. Preserve the selected "
+    "option's destinations and constraints. The user's current selection "
+    "takes priority over saved preferences and older itineraries. "
+    "If the referenced options are missing or the selection is ambiguous, "
+    "ask a clarifying question instead of inventing an unrelated trip.\n"
+)
 
 SYSTEM_PROMPT = (
     "You are Voya AI, a travel assistant.\n"
-    "Respond with ONLY one valid JSON object. No markdown, no code fences, "
+    + CONVERSATION_CONTEXT_RULES
+    + FEE_INSTRUCTION
+    + BUDGET_PRESENTATION_INSTRUCTION
+    + venue_location_context()
+    + "Respond with ONLY one valid JSON object. No markdown, no code fences, "
     "no explanation, and no text before or after the JSON.\n"
     "Match this exact schema and field names:\n"
     "{\n"
@@ -41,15 +128,28 @@ SYSTEM_PROMPT = (
 
 
 def _call_groq(client: Groq, messages: List[Dict[str, str]], temperature: float) -> str:
-    response = client.chat.completions.create(
-        model=GROQ_MODEL,
-        messages=messages,
-        reasoning_effort="low",
-        max_tokens=1024,
-        temperature=temperature,
-        response_format={"type": "json_object"},
-    )
-    return response.choices[0].message.content
+    final_messages = messages + [{"role": "system", "content": FINAL_ANSWER_INSTRUCTION}]
+    for attempt in range(2):
+        try:
+            response = client.chat.completions.create(
+                model=GROQ_MODEL,
+                messages=final_messages,
+                reasoning_effort="low",
+                max_completion_tokens=MAX_COMPLETION_TOKENS * (attempt + 1),
+                temperature=temperature,
+                response_format=CHAT_RESPONSE_FORMAT,
+                tool_choice="none",
+            )
+            choice = response.choices[0]
+            if getattr(choice, "finish_reason", None) == "length":
+                raise IncompleteGenerationError("Output token limit reached")
+            content = choice.message.content or ""
+            json.loads(content)
+            return content
+        except (BadRequestError, IncompleteGenerationError, json.JSONDecodeError) as error:
+            if attempt or not _can_retry_generation(error):
+                raise
+    raise IncompleteGenerationError("No complete response")
 
 
 def _fallback_reply(summary: str) -> dict:
@@ -85,7 +185,8 @@ TOOL_DECISION_SYSTEM_PROMPT = (
     "needed to answer the user's message well. Call a tool only when it "
     "would genuinely improve the answer (e.g. the user asked about weather, "
     "budget, specific places, or wants a day-by-day itinerary). If no tool "
-    "is needed, respond with no tool calls at all."
+    "is needed, respond with no tool calls at all.\n"
+    + CONVERSATION_CONTEXT_RULES
 )
 
 # Upper bound on how many tool calls one turn will actually execute, even if
@@ -95,7 +196,8 @@ MAX_TOOL_CALLS_PER_TURN = 4
 
 
 def _run_tool_calling_phase(
-    client: Groq, user_message: str, candidate_tools: List[str]
+    client: Groq, user_message: str, candidate_tools: List[str],
+    history: Optional[List[Dict[str, str]]] = None,
 ) -> Tuple[str, List[str]]:
     """Offers the model only the tool(s) context_router.py flagged as
     plausibly relevant for this message (candidate_tools), and lets it
@@ -119,13 +221,16 @@ def _run_tool_calling_phase(
     if not schemas:
         return "", []
 
+    # Tools need the same recent choices as final generation; otherwise
+    # a weather/budget request about "option 2" can use a guessed place.
+    messages = [{"role": "system", "content": TOOL_DECISION_SYSTEM_PROMPT}]
+    messages.extend(history or [])
+    messages.append({"role": "user", "content": user_message})
+
     try:
         response = client.chat.completions.create(
             model=GROQ_MODEL,
-            messages=[
-                {"role": "system", "content": TOOL_DECISION_SYSTEM_PROMPT},
-                {"role": "user", "content": user_message},
-            ],
+            messages=messages,
             tools=schemas,
             tool_choice="auto",
             max_tokens=512,
@@ -196,7 +301,9 @@ def _build_prompt_messages(
     tool_names_used: List[str] = []
     if candidate_tools:
         tool_client = Groq(api_key=api_key)
-        tool_context, tool_names_used = _run_tool_calling_phase(tool_client, user_message, candidate_tools)
+        tool_context, tool_names_used = _run_tool_calling_phase(
+            tool_client, user_message, candidate_tools, history=history
+        )
 
     # Unlike memory/KB/tools, this costs no extra I/O to include — the
     # caller (routes/chat.py) already has `user_preferences` in hand from
@@ -209,6 +316,14 @@ def _build_prompt_messages(
     preferences_context = format_preferences_context(user_preferences)
 
     system_prompt = SYSTEM_PROMPT
+    if is_options_request(user_message):
+        system_prompt += (
+            "\nThe user is comparing travel options, not choosing a trip yet. "
+            "Briefly describe each requested option as a numbered list in "
+            "summary, set destination/days/budget_lkr to null and itinerary "
+            "to [], and ask which option they prefer in follow_up_question. "
+            "Do not ask them to reconfirm every option's days or budget.\n"
+        )
     if preferences_context:
         system_prompt += f"\n{preferences_context}\n"
     if memory_context:
@@ -223,6 +338,18 @@ def _build_prompt_messages(
         )
     if tool_context:
         system_prompt += f"\n{tool_context}\n"
+    budget_cap_lkr = resolve_budget_cap(user_message, history)
+    if budget_cap_lkr is not None:
+        system_prompt += (
+            f"\nThe user's current TOTAL budget cap is LKR {budget_cap_lkr:,}. "
+            "It is a hard maximum for this entire trip, not a per-day budget. "
+            "Keep budget_lkr at or below it, preserve it on follow-up edits, "
+            "and describe costs as planning estimates. Do not claim that "
+            "unverified prices guarantee affordability.\n"
+        )
+    edit_context = addition_prompt_context(user_message, history)
+    if edit_context:
+        system_prompt += "\n" + edit_context
 
     messages = [{"role": "system", "content": system_prompt}]
     if history:
@@ -248,6 +375,14 @@ def _make_retry(client: Groq, messages: List[Dict[str, str]]):
         return normalize_chat_response(retry_content)
 
     return retry_with_feedback
+
+
+def _prepare_reply(user_message: str, normalized: dict, retry_fn, history=None) -> dict:
+    validated = validate_ai_response(user_message, normalized, retry_fn, history=history)
+    validated = attach_budget_details(validated, resolve_budget_cap(user_message, history))
+    if validated.get("itinerary"):
+        validated["fee_notice"] = FEE_NOTICE
+    return validated
 
 
 def get_groq_reply(
@@ -279,13 +414,14 @@ def get_groq_reply(
         content = _call_groq(client, messages, temperature=0.4)
         normalized = normalize_chat_response(content)
 
-        validated = validate_ai_response(user_message, normalized, _make_retry(client, messages))
+        validated = _prepare_reply(user_message, normalized, _make_retry(client, messages), history)
         validated["kb_sources"] = kb_sources
         validated["tools_used"] = tool_names_used
         return validated
 
     except Exception as e:
-        return _fallback_reply(f"Groq error: {str(e)}")
+        print(f"[groq] reply failed: {type(e).__name__}")
+        return _fallback_reply(GENERATION_FAILURE_MESSAGE)
 
 
 def stream_groq_reply(
@@ -298,22 +434,14 @@ def stream_groq_reply(
     user_preferences: Optional[Dict[str, object]] = None,
 ) -> Iterator[Tuple[str, object]]:
     """Same reply pipeline as get_groq_reply (same prompt, same
-    normalize/validate/retry, same kb_sources), but as it happens: yields
-    ("delta", text) for each newly-available fragment of the visible
-    `summary` field as the model generates it, ("tick", None) for every
-    other raw chunk from Groq (one with no visible text in it — see below
-    for why these matter too), followed by exactly one terminal
+    normalize/validate/retry, same kb_sources). Yields ("tick", None) for
+    generation progress, then ("delta", validated_summary) and one terminal
     ("done", validated_dict) — never raises.
 
-    Only the `summary` field is streamed live (see
-    json_utils.SummaryStreamExtractor for why) — the rest of the reply
-    (itinerary, destination, budget, kb_sources, and the final,
-    validation-corrected summary if a retry was needed) is only available,
-    same as before, once the whole object is complete, in the ("done", ...)
-    payload. The caller (routes/chat.py) treats that payload as the one
-    source of truth for what actually gets saved — this generator never
-    doubles as the save path itself, so streaming vs. non-streaming always
-    persist identically.
+    Text is held until validation completes so an over-budget estimate or
+    unsupported fee claim is never briefly displayed before a correction.
+    The frontend still types the validated summary and itinerary gradually.
+    The done payload remains the source of truth for persistence.
 
     The ("tick", None) events exist purely for cancellation, not display:
     routes/chat.py's chat_stream pulls one item from this generator at a
@@ -376,26 +504,28 @@ def stream_groq_reply(
         )
 
         client = Groq(api_key=api_key)
-        extractor = SummaryStreamExtractor()
         raw_chunks: List[str] = []
 
         completion_stream = client.chat.completions.create(
             model=GROQ_MODEL,
-            messages=messages,
+            messages=messages + [{"role": "system", "content": FINAL_ANSWER_INSTRUCTION}],
             reasoning_effort="low",
-            max_tokens=1024,
+            max_completion_tokens=MAX_COMPLETION_TOKENS,
             temperature=0.4,
             response_format={"type": "json_object"},
+            tool_choice="none",
             stream=True,
         )
+        finish_reason = None
         for chunk in completion_stream:
-            delta = chunk.choices[0].delta.content
+            if not chunk.choices:
+                yield ("tick", None)
+                continue
+            choice = chunk.choices[0]
+            finish_reason = getattr(choice, "finish_reason", None) or finish_reason
+            delta = choice.delta.content
             if delta:
                 raw_chunks.append(delta)
-                new_text = extractor.feed(delta)
-                if new_text:
-                    yield ("delta", new_text)
-                    continue
 
             # This particular raw chunk had nothing visible in it — no
             # delta at all, or one that landed outside the `summary` string
@@ -414,15 +544,37 @@ def stream_groq_reply(
             yield ("tick", None)
 
         content = "".join(raw_chunks)
+        if finish_reason == "length":
+            raise IncompleteGenerationError("Output token limit reached")
+        # Never repair a truncated stream into a seemingly successful plan.
+        # Recover using a complete, strictly structured answer instead.
+        json.loads(content)
         normalized = normalize_chat_response(content)
 
-        validated = validate_ai_response(user_message, normalized, _make_retry(client, messages))
+        validated = _prepare_reply(user_message, normalized, _make_retry(client, messages), history)
         validated["kb_sources"] = kb_sources
         validated["tools_used"] = tool_names_used
+        yield ("delta", validated["summary"])
         yield ("done", validated)
 
     except Exception as e:
-        yield ("done", _fallback_reply(f"Groq error: {str(e)}"))
+        if _can_retry_generation(e):
+            try:
+                if completion_stream is not None:
+                    completion_stream.close()
+                    completion_stream = None
+                content = _call_groq(client, messages, temperature=0.2)
+                normalized = normalize_chat_response(content)
+                validated = _prepare_reply(user_message, normalized, _make_retry(client, messages), history)
+                validated["kb_sources"] = kb_sources
+                validated["tools_used"] = tool_names_used
+                yield ("delta", validated["summary"])
+                yield ("done", validated)
+                return
+            except Exception as retry_error:
+                e = retry_error
+        print(f"[groq] streamed reply failed: {type(e).__name__}")
+        yield ("done", _fallback_reply(GENERATION_FAILURE_MESSAGE))
     finally:
         # Runs on every exit path: normal completion, the fallback above, AND
         # an early GeneratorExit from the caller closing us — release()/close()

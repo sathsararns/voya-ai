@@ -50,6 +50,94 @@ afterEach(() => {
   cleanup()
 })
 
+describe('Composer — message input grows with its content', () => {
+  beforeEach(() => {
+    useAppStore.setState(initialState, true)
+  })
+
+  afterEach(() => {
+    vi.unstubAllGlobals()
+    useAppStore.setState(initialState, true)
+  })
+
+  it.each([{ compact: true, minimum: 24 }, { compact: false, minimum: 48 }])(
+    'grows for wrapped text and shrinks after deletion (compact=$compact)',
+    ({ compact, minimum }) => {
+      render(<Composer compact={compact} />)
+      const input = screen.getByLabelText<HTMLTextAreaElement>('Message Voya AI')
+      let measuredHeight = 72
+      Object.defineProperty(input, 'scrollHeight', { configurable: true, get: () => measuredHeight })
+
+      fireEvent.change(input, { target: { value: 'A long message that wraps across several lines while keeping the earlier text visible.' } })
+      expect(input.style.height).toBe('72px')
+      expect(input.style.overflowY).toBe('hidden')
+      expect(input.value).toContain('A long message')
+
+      measuredHeight = 24
+      fireEvent.change(input, { target: { value: 'Short' } })
+      expect(input.style.height).toBe(`${minimum}px`)
+    },
+  )
+
+  it('caps very long messages at three lines and restores the smaller height after deletion', () => {
+    render(<Composer compact />)
+    const input = screen.getByLabelText<HTMLTextAreaElement>('Message Voya AI')
+    let measuredHeight = 600
+    Object.defineProperty(input, 'scrollHeight', { configurable: true, get: () => measuredHeight })
+
+    fireEvent.change(input, { target: { value: 'Long pasted message\n'.repeat(30) } })
+    expect(input.style.height).toBe('72px')
+    expect(input.style.overflowY).toBe('auto')
+
+    measuredHeight = 48
+    fireEvent.change(input, { target: { value: 'First line\nSecond line' } })
+    expect(input.style.height).toBe('48px')
+    expect(input.style.overflowY).toBe('hidden')
+  })
+
+  it('keeps Shift+Enter available and resets the height after sending the full multiline message', () => {
+    const send = vi.fn()
+    useAppStore.setState({ send })
+    render(<Composer compact />)
+    const input = screen.getByLabelText<HTMLTextAreaElement>('Message Voya AI')
+    Object.defineProperty(input, 'scrollHeight', {
+      configurable: true, get: () => input.value ? 48 : 24,
+    })
+    fireEvent.change(input, { target: { value: 'First line\nSecond line' } })
+    fireEvent.keyDown(input, { key: 'Enter', shiftKey: true })
+
+    expect(send).not.toHaveBeenCalled()
+    expect(input.value).toBe('First line\nSecond line')
+    expect(input.style.height).toBe('48px')
+
+    fireEvent.keyDown(input, { key: 'Enter' })
+    expect(send).toHaveBeenCalledWith('First line\nSecond line')
+    expect(input.value).toBe('')
+    expect(input.style.height).toBe('24px')
+  })
+
+  it('remeasures line wrapping when the available width changes', () => {
+    let onResize!: ResizeObserverCallback
+    const disconnect = vi.fn()
+    vi.stubGlobal('ResizeObserver', class {
+      constructor(callback: ResizeObserverCallback) { onResize = callback }
+      observe = vi.fn()
+      disconnect = disconnect
+    })
+    const { unmount } = render(<Composer compact />)
+    const input = screen.getByLabelText<HTMLTextAreaElement>('Message Voya AI')
+    Object.defineProperty(input, 'scrollHeight', { configurable: true, get: () => 96 })
+
+    act(() => {
+      onResize([{ contentRect: { width: 320 } }] as ResizeObserverEntry[], {} as ResizeObserver)
+    })
+    expect(input.style.height).toBe('72px')
+    expect(input.style.overflowY).toBe('auto')
+    unmount()
+    expect(disconnect).toHaveBeenCalledOnce()
+  })
+})
+
 describe('Composer — Stop generating button', () => {
   beforeEach(async () => {
     useAppStore.setState(initialState, true)
