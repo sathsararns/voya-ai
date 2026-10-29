@@ -1,6 +1,5 @@
 import { Composer } from '../components/Composer'
 import { ChatThread } from '../components/ChatThread'
-import { currentUser } from '../data/user'
 import { useAppStore } from '../hooks/useAppStore'
 import { AnimatePresence, motion } from 'framer-motion'
 import { Loader2Icon } from 'lucide-react'
@@ -70,7 +69,7 @@ export function Home() {
                 }}
               />
               <p className="mt-7 text-base font-medium text-muted sm:text-lg">
-                {greeting()}, {currentUser.firstName} 👋
+                {greeting()} 👋
               </p>
               <h1 className="mt-1 font-display text-[32px] font-bold tracking-tight text-ink sm:text-[42px]">
                 Where To <span className="text-ink">Next?</span>
