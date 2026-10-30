@@ -63,8 +63,8 @@ beforeEach(() => {
   window.localStorage.clear()
 })
 
-describe('initConversations — flow 1: fresh startup shows blank New Chat', () => {
-  it('never restores a previous conversation as active, even when the sidebar has history', async () => {
+describe('initConversations — anonymous initialization', () => {
+  it('does not restore an account selection without an authenticated identity', async () => {
     const conversations = [
       {
         conversation_id: 'conv-1',

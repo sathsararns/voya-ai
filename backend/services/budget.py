@@ -6,6 +6,8 @@ from decimal import Decimal
 from typing import Optional
 
 from services.context_router import is_options_request
+from services.trip_state import keeps_budget, last_plan, scoped_trip_history
+from services.preference_policy import planning_text
 
 DAILY_BUDGET_LKR_BY_STYLE = {"budget": 8_000, "mid-range": 18_000, "luxury": 45_000}
 BREAKDOWN_PERCENTAGES_BY_STYLE = {
@@ -27,6 +29,12 @@ BUDGET_PRESENTATION_INSTRUCTION = (
     "Only an explicitly supplied trip cap is a stated budget. A saved budget "
     "preference is advisory and requires confirmed account preference data. "
     "Otherwise label any proposed total as a suggested planning estimate.\n"
+    "No current booking-price verification service is available. A budget allocation "
+    "or per-person division cannot establish actual affordability. Do not assert "
+    "that a budget is insufficient or a trip is not feasible without supporting "
+    "cost evidence, and do not guarantee that it is affordable. If costs cannot "
+    "be verified, say you cannot confirm feasibility, explain possible compromises "
+    "and ask for missing dates or quotes. Do not reject solely because the party grew.\n"
 )
 
 _AMOUNT = r"(?P<amount>\d[\d,]*(?:\.\d+)?)(?:\s*(?P<scale>k|thousand))?\b"
@@ -84,6 +92,7 @@ def resolve_budget_cap(message: str, history=None) -> Optional[int]:
     current = extract_budget_cap(message)
     if current is not None:
         return current
+    history = scoped_trip_history(message, history)
     for turn in reversed(history or []):
         if turn.get("role") == "user":
             previous = extract_budget_cap(turn.get("content", ""))
@@ -99,6 +108,14 @@ def resolve_budget_cap(message: str, history=None) -> Optional[int]:
             cap = reply.get("budget_cap_lkr") if isinstance(reply, dict) else None
             if type(cap) is int and cap >= 0:
                 return cap
+    # "Keep the total budget" explicitly adopts the previous proposal when
+    # no stronger user-stated cap exists. An unaccepted model estimate alone
+    # still never becomes a cap.
+    previous = last_plan(history)
+    if keeps_budget(message) and previous is not None:
+        total = previous.get("budget_lkr")
+        if type(total) is int and total >= 0:
+            return total
     return None
 
 
@@ -189,6 +206,53 @@ def saved_budget_range(preferences=None):
     return lower, upper
 
 
+def requests_saved_budget(message: str) -> bool:
+    message = planning_text(message)
+    return bool(re.search(r"\bsaved\s+(?:total\s+)?budget\b", message, re.I))
+
+
+def validate_budget_feasibility(data: dict, budget_cap_lkr=None) -> list[str]:
+    # This app has planning allowances, not a verified price/availability engine.
+    # The check also covers refusals, which have no itinerary to validate.
+    text = data.get("summary") or ""
+    if budget_cap_lkr is None and data.get("budget_lkr") is None and not re.search(
+        r"\b(?:budget|costs?|afford\w*|prices?|funds?|spending)\b", text, re.I,
+    ):
+        return []
+    for sentence in re.split(r"[.!?]\s+", text):
+        unsupported = re.search(
+            r"\b(?:is|are|would be|will be|remains?)\s+(?:simply\s+)?not\s+(?:feasible|affordable|possible)\b"
+            r"|\b(?:is|are|would be)\s+(?:simply\s+)?(?:insufficient|not enough)\b"
+            r"|\b(?:guaranteed|definitely|certainly)\s+(?:affordable|feasible|within\s+(?:the|your)\s+budget)\b"
+            r"|\b(?:guarantee|guarantees)\b[^.!?]{0,60}\b(?:affordability|affordable|within.*budget)\b",
+            sentence, re.I,
+        )
+        qualified = unsupported and re.search(
+            r"\b(?:cannot|can't|unable to)\s+(?:verify|confirm|guarantee)\b[^,;.!?]{0,100}$",
+            sentence[:unsupported.start()], re.I,
+        )
+        if unsupported and not qualified:
+            return ["Do not claim verified budget feasibility or categorical insufficiency from planning allowances or per-person division. Current prices are unverified. Say you cannot confirm whether the trip fits the cap, explain compromises, and ask for dates or quotes rather than declaring it impossible or guaranteed affordable."]
+    return []
+
+
+def validate_saved_budget_request(message: str, data: dict, preferences=None, history=None) -> list[str]:
+    if not data.get("itinerary") or not requests_saved_budget(message):
+        return []
+    if extract_budget_cap(message) is not None:
+        return []  # the current explicit amount supersedes a saved preference
+    limits = saved_budget_range(preferences)
+    if limits is None:
+        return []  # preflight asks for a confirmed range instead of guessing
+    lower, upper = limits
+    cap = resolve_budget_cap(message, history)
+    upper = min(upper, cap) if cap is not None else upper
+    total = data.get("budget_lkr")
+    if type(total) is not int or not lower <= total <= upper:
+        return [f"The user requested an estimated total within the confirmed saved budget range. Set budget_lkr between {lower} and {upper} LKR, respecting the current cap. Do not omit the total or claim an unsupported allowance."]
+    return []
+
+
 def validate_budget_origin(data: dict, budget_cap_lkr=None, preferences=None) -> list[str]:
     if not data.get("itinerary"):
         return []
@@ -196,7 +260,7 @@ def validate_budget_origin(data: dict, budget_cap_lkr=None, preferences=None) ->
     saved = saved_budget_range(preferences)
     saved_pattern = (
         r"\b(?:your|the user's)\s+(?:(?:saved|usual|typical|normal|regular|preferred|previous|past)\s+)+(?:total\s+)?budget"
-        r"|\b(?:saved|usual|typical|normal)\s+budget(?:\s+range|\s+preference)?\b"
+        r"|\b(?:saved|usual|typical|normal)\s+(?:budget(?:\s+range|\s+preference)?|(?:planning\s+)?allowance)\b"
     )
     def positive_claim(pattern):
         for match in re.finditer(pattern, summary, re.I):
@@ -212,6 +276,8 @@ def validate_budget_origin(data: dict, budget_cap_lkr=None, preferences=None) ->
         return ["There is no confirmed saved budget preference. Do not claim this estimate is the user's usual or saved budget; label it as a suggested estimate."]
     if saved_claim and saved is not None:
         total = data.get("budget_lkr")
+        if type(total) is not int:
+            return ["A claim that the itinerary fits a saved budget requires a numeric estimated trip total; do not substitute an unspecified planning allowance."]
         if type(total) is int and not saved[0] <= total <= saved[1]:
             return [f"The proposed total is outside the confirmed saved budget range {saved}; do not claim it fits that range."]
     if budget_cap_lkr is None and not saved_claim and positive_claim(

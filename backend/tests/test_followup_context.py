@@ -93,12 +93,9 @@ def test_chat_routes_send_the_offered_options_to_generation(monkeypatch, streami
     save_chat.assert_called_once()
 
 
-def test_final_generation_and_tools_receive_the_same_options(monkeypatch):
-    client = MagicMock()
-    client.chat.completions.create.return_value = SimpleNamespace(
-        choices=[SimpleNamespace(message=SimpleNamespace(tool_calls=[]))],
-    )
-    monkeypatch.setattr(groq_service, "Groq", lambda **_: client)
+def test_option_weather_keeps_choices_without_guessing_a_saved_destination(monkeypatch):
+    model = MagicMock(side_effect=AssertionError("Prompt preparation must not spend an AI call"))
+    monkeypatch.setattr(groq_service, "Groq", model)
     message = "What is the weather for option 2?"
 
     messages, sources, tools_used = groq_service._build_prompt_messages(
@@ -108,9 +105,9 @@ def test_final_generation_and_tools_receive_the_same_options(monkeypatch):
         user_preferences={"preferred_destinations": ["Kandy"]},
     )
 
-    assert messages[1:-1] == HISTORY
+    assert messages[1] == HISTORY[0]
+    assert json.loads(messages[2]["content"]) == json.loads(HISTORY[1]["content"])
     assert messages[-1] == {"role": "user", "content": message}
-    tool_messages = client.chat.completions.create.call_args.kwargs["messages"]
-    assert tool_messages[1:] == HISTORY + [{"role": "user", "content": message}]
+    model.assert_not_called()
     assert sources == []
     assert tools_used == []

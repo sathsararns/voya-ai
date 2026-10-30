@@ -1,8 +1,11 @@
 from services.context_router import is_information_only_request
 from services.budget import extract_budget_cap
+from services.preference_policy import learning_disabled
 
 
 def build_memory_text(user_message: str, reply_data: dict) -> str:
+    if learning_disabled(user_message) or reply_data.get("_skip_preference_learning"):
+        return ""
     if is_information_only_request(user_message):
         return ""
     parts = []

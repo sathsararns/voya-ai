@@ -1,5 +1,6 @@
 import json
 import os
+import re
 from typing import Dict, Iterator, List, Optional, Tuple
 
 from groq import BadRequestError, Groq
@@ -10,16 +11,20 @@ from pinecone_memory import format_memory_context
 from services.kb_rag import KnowledgeBaseUnavailable, build_kb_sources, format_kb_context, search_knowledge_base
 from services.retrieval_policy import build_search_query
 from services.response_validator import validate_ai_response
-from services.tools import TOOL_SCHEMAS, execute_tool_call
+from services.local_context import local_tool_context
+from services.prompt_context import compact_history
 from services.user_preferences import format_preferences_context
 from services.context_router import is_options_request, is_preference_statement
-from services.answer_policy import information_fallback, non_trip_answer, normalize_answer_shape
-from services.budget import BUDGET_PRESENTATION_INSTRUCTION, attach_budget_details, resolve_budget_cap
+from services.answer_policy import information_fallback, non_trip_answer, normalize_answer_shape, planning_preflight_reply
+from services.budget import BUDGET_PRESENTATION_INSTRUCTION, attach_budget_details, extract_budget_cap, requests_saved_budget, resolve_budget_cap, saved_budget_range
 from services.fee_policy import FEE_INSTRUCTION, FEE_NOTICE
 from services.venue_facts import venue_location_context
 from services.itinerary_edits import addition_prompt_context
 from services.planning_context import attach_planning_context, planning_prompt_context
 from services.provider_retry import failure_details, log_failure, open_completion_stream, request_completion
+from services.transport_policy import TRANSPORT_INSTRUCTION
+from services.trip_state import scoped_trip_history, last_plan
+from services.preference_policy import learning_disabled, learning_requested
 
 load_dotenv()
 
@@ -69,7 +74,6 @@ FINAL_ANSWER_INSTRUCTION = (
     "never put a serialized JSON list or array delimiters inside a string."
     " Treat any stated total budget as a hard maximum. Category allocations "
     "are estimates, not verified quotes. Do not invent free entry or discounts."
-    + "\n" + BUDGET_PRESENTATION_INSTRUCTION
 )
 
 GENERATION_FAILURE_MESSAGE = "I couldn't finish that response. Please try your request again."
@@ -108,7 +112,7 @@ SYSTEM_PROMPT = (
     + CONVERSATION_CONTEXT_RULES
     + FEE_INSTRUCTION
     + BUDGET_PRESENTATION_INSTRUCTION
-    + venue_location_context()
+    + TRANSPORT_INSTRUCTION
     + "Respond with ONLY one valid JSON object. No markdown, no code fences, "
     "no explanation, and no text before or after the JSON.\n"
     "Match this exact schema and field names:\n"
@@ -183,97 +187,6 @@ def _provider_failure_reply(stage: str, error: Exception) -> dict:
     return _fallback_reply(message, code, delay)
 
 
-# System prompt for the separate, lightweight tool-decision call (see
-# _run_tool_calling_phase) — deliberately NOT the main SYSTEM_PROMPT: that
-# one demands a single strict JSON object and says nothing about tools,
-# which is exactly what the FINAL answer call still needs (tool results are
-# folded into ITS system prompt as plain context instead — see
-# _build_prompt_messages below). Keeping the two prompts/calls separate means
-# tool-calling and the existing strict-JSON-mode generation never have to
-# coexist in the same Groq request, which sidesteps any question of whether
-# a given provider supports both at once.
-TOOL_DECISION_SYSTEM_PROMPT = (
-    "You are a travel-planning assistant deciding whether any tools are "
-    "needed to answer the user's message well. Call a tool only when it "
-    "would genuinely improve the answer (e.g. the user asked about weather, "
-    "budget, specific places, or wants a day-by-day itinerary). If no tool "
-    "is needed, respond with no tool calls at all.\n"
-    + CONVERSATION_CONTEXT_RULES
-)
-
-# Upper bound on how many tool calls one turn will actually execute, even if
-# the model requests more — keeps a single turn's cost/latency bounded
-# regardless of what the model asks for.
-MAX_TOOL_CALLS_PER_TURN = 4
-
-
-def _run_tool_calling_phase(
-    client: Groq, user_message: str, candidate_tools: List[str],
-    history: Optional[List[Dict[str, str]]] = None,
-) -> Tuple[str, List[str]]:
-    """Offers the model only the tool(s) context_router.py flagged as
-    plausibly relevant for this message (candidate_tools), and lets it
-    decide — via Groq's own function-calling (tool_choice="auto") — whether
-    to actually call any of them. Genuine model agency, just scoped to a
-    short, relevant menu instead of always offering all four tools to every
-    message (same reasoning context_router already applies to
-    memory/history/KB: skip the round trip when it obviously isn't needed).
-
-    Never raises: a failed tool-decision call, a tool the model asks for
-    that doesn't exist, or a tool that errors internally all just mean no
-    tool context gets added — exactly as if the model had chosen not to
-    call anything. Returns (context_block, tool_names_used); context_block
-    is "" when nothing was called, ready to be spliced into the main system
-    prompt alongside memory_context/kb_context.
-    """
-    if not candidate_tools:
-        return "", []
-
-    schemas = [s for s in TOOL_SCHEMAS if s["function"]["name"] in candidate_tools]
-    if not schemas:
-        return "", []
-
-    # Tools need the same recent choices as final generation; otherwise
-    # a weather/budget request about "option 2" can use a guessed place.
-    messages = [{"role": "system", "content": TOOL_DECISION_SYSTEM_PROMPT}]
-    messages.extend(history or [])
-    messages.append({"role": "user", "content": user_message})
-
-    try:
-        response = client.chat.completions.create(
-            model=GROQ_MODEL,
-            messages=messages,
-            tools=schemas,
-            tool_choice="auto",
-            max_tokens=512,
-            temperature=0.2,
-        )
-    except Exception as e:
-        log_failure("tool_decision", e)
-        return "", []
-
-    tool_calls = getattr(response.choices[0].message, "tool_calls", None) or []
-    if not tool_calls:
-        return "", []
-
-    tool_names_used: List[str] = []
-    result_lines = [
-        "Tool results (real data — ground your answer in these where "
-        "relevant, but still respond using the exact JSON schema below):"
-    ]
-    for call in tool_calls[:MAX_TOOL_CALLS_PER_TURN]:
-        name = call.function.name
-        try:
-            arguments = json.loads(call.function.arguments or "{}")
-        except json.JSONDecodeError:
-            arguments = {}
-        result = execute_tool_call(name, arguments)
-        tool_names_used.append(name)
-        result_lines.append(f"- {name}({json.dumps(arguments)}): {json.dumps(result)}")
-
-    return "\n".join(result_lines), tool_names_used
-
-
 def _build_prompt_messages(
     user_message: str,
     session_id: Optional[str],
@@ -290,6 +203,7 @@ def _build_prompt_messages(
     message list handed to Groq. Kept in one place so streaming and
     non-streaming replies are always grounded in identical context.
     """
+    history = scoped_trip_history(user_message, history)
     # use_memory/use_knowledge_base come from the context_router decision —
     # when it decides a source isn't relevant to this message, skip that
     # lookup entirely rather than querying and discarding it. Memory
@@ -315,19 +229,12 @@ def _build_prompt_messages(
     if retrieval_state is not None:
         retrieval_state["status"] = kb_status
 
-    # A separate, throwaway Groq client for the tool-decision round only —
-    # cheap to construct (same pattern get_groq_reply/stream_groq_reply
-    # already use for their own client), and keeping it separate from the
-    # main generation client makes the two calls' independence explicit.
-    tool_context = ""
-    tool_names_used: List[str] = []
-    if candidate_tools and not is_preference_statement(user_message):
-        # Optional tool selection does not spend additional SDK retries;
-        # final generation owns the bounded recovery/cooldown.
-        tool_client = Groq(api_key=api_key, timeout=20, max_retries=0)
-        tool_context, tool_names_used = _run_tool_calling_phase(
-            tool_client, user_message, candidate_tools, history=history
-        )
+    # Budget arithmetic and climate lookups are deterministic. Reuse the
+    # existing filtered KB evidence for places/itinerary planning instead of
+    # asking a second model to select tools and repeating the same search.
+    tool_context, tool_names_used = local_tool_context(
+        user_message, candidate_tools, history,
+    ) if not is_preference_statement(user_message) else ("", [])
 
     # Unlike memory/KB/tools, this costs no extra I/O to include — the
     # caller (routes/chat.py) already has `user_preferences` in hand from
@@ -340,6 +247,11 @@ def _build_prompt_messages(
     preferences_context = format_preferences_context(user_preferences)
 
     system_prompt = SYSTEM_PROMPT
+    # The coastal venue catalogue is useful only when those places occur
+    # in this turn's request, active history or retrieved references.
+    venue_text = " ".join([user_message, kb_context, *(t.get("content", "") for t in history or [])])
+    if re.search(r"\b(?:galle|bentota|beruwala|kalawila|brief gardens?|maritime museum|groote kerk)\b", venue_text, re.I):
+        system_prompt += venue_location_context()
     if non_trip_answer(user_message):
         system_prompt += (
             "\nThis is a factual question, attraction list or preference acknowledgement, "
@@ -381,6 +293,15 @@ def _build_prompt_messages(
     if tool_context:
         system_prompt += f"\n{tool_context}\n"
     budget_cap_lkr = resolve_budget_cap(user_message, history)
+    limits = saved_budget_range(user_preferences)
+    if requests_saved_budget(user_message) and limits and extract_budget_cap(user_message) is None:
+        upper = min(limits[1], budget_cap_lkr) if budget_cap_lkr is not None else limits[1]
+        system_prompt += (
+            f"\nThe user explicitly asks to use the confirmed saved budget range. "
+            f"For an itinerary, return a numeric budget_lkr between {limits[0]} and {upper}. "
+            "This is an estimated allocation, not verified prices. Do not omit the total "
+            "or call an unsupported allowance a saved preference.\n"
+        )
     if budget_cap_lkr is not None:
         system_prompt += (
             f"\nThe user's current TOTAL budget cap is LKR {budget_cap_lkr:,}. "
@@ -395,7 +316,7 @@ def _build_prompt_messages(
 
     messages = [{"role": "system", "content": system_prompt}]
     if history:
-        messages.extend(history)
+        messages.extend(compact_history(history))
     messages.append({"role": "user", "content": user_message})
 
     return messages, kb_sources, tool_names_used
@@ -420,10 +341,18 @@ def _make_retry(client: Groq, messages: List[Dict[str, str]]):
 
 
 def _prepare_reply(user_message: str, normalized: dict, retry_fn, history=None, user_preferences=None) -> dict:
+    history = scoped_trip_history(user_message, history)
     normalized = normalize_answer_shape(user_message, normalized)
     def retry_with_shape(issues):
         return normalize_answer_shape(user_message, retry_fn(issues))
     validated = validate_ai_response(user_message, normalized, retry_with_shape, history=history, user_preferences=user_preferences)
+    previous = last_plan(history)
+    skip_learning = learning_disabled(user_message) or (
+        bool(previous and previous.get("_skip_preference_learning")) and not learning_requested(user_message)
+    )
+    validated.pop("_skip_preference_learning", None)
+    if skip_learning:
+        validated["_skip_preference_learning"] = True
     if non_trip_answer(user_message):
         return normalize_answer_shape(user_message, validated)
     validated = attach_planning_context(validated, user_message, history)
@@ -434,7 +363,14 @@ def _prepare_reply(user_message: str, normalized: dict, retry_fn, history=None, 
 
 
 def _attach_retrieval_details(reply: dict, sources: list[dict]) -> None:
+    if reply.get("error_code"):
+        reply["kb_sources"] = []
+        return
     reply["kb_sources"] = sources
+    # Do not repeat a server notice copied from an older turn when the
+    # current answer has no supporting timetable reference. Rebuild once
+    # from the current retrieval, rather than trusting generated notices.
+    reply["summary"] = re.sub(r"(?m)^Train reference: notice dated[^\n]*\n?", "", reply["summary"]).strip()
     # A dated timetable must never look like a current service guarantee,
     # even when the model omits the prompt's caveat. This is server-owned.
     dates = sorted({s["source_date"] for s in sources if s.get("route_origin") and s.get("source_date")})
@@ -455,6 +391,10 @@ def get_groq_reply(
     candidate_tools: Optional[List[str]] = None,
     user_preferences: Optional[Dict[str, object]] = None,
 ) -> dict:
+    history = scoped_trip_history(user_message, history)
+    preflight = planning_preflight_reply(user_message, history, user_preferences)
+    if preflight is not None:
+        return preflight
     api_key = os.getenv("GROQ_API_KEY")
     if not api_key:
         raise RuntimeError("GROQ_API_KEY is missing")
@@ -543,15 +483,16 @@ def stream_groq_reply(
     which is what actually releases the underlying HTTP connection to Groq
     instead of leaving it dangling.
 
-    If `candidate_tools` is non-empty, a separate, non-streamed tool-decision
-    call happens first (see _build_prompt_messages/_run_tool_calling_phase) —
-    entirely before this function's own Groq stream even starts, so it adds
-    a bounded amount of latency before the first token, but never changes
-    the streaming contract itself: tool results just become more context
-    folded into the same system prompt memory_context/kb_context already
-    use, and any tools actually used surface in the terminal ("done", ...)
-    payload's `tools_used` list, same as `kb_sources` already does.
+    Deterministic tools and a single filtered KB lookup prepare the prompt
+    without a separate model tool-selection call. The usual successful turn
+    uses one model completion; validation/recovery can still need another.
     """
+    history = scoped_trip_history(user_message, history)
+    preflight = planning_preflight_reply(user_message, history, user_preferences)
+    if preflight is not None:
+        yield ("delta", preflight["summary"])
+        yield ("done", preflight)
+        return
     api_key = os.getenv("GROQ_API_KEY")
     if not api_key:
         yield ("done", _fallback_reply("Groq error: GROQ_API_KEY is missing"))

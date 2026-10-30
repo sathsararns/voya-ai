@@ -1,11 +1,9 @@
 """Travel tools the assistant can call: weather, places, budget, itinerary.
 
-These are genuine function-calling tools in the OpenAI/Groq sense (TOOL_SCHEMAS
-is handed to Groq's `tools` param — see services/groq_service.py's
-_run_tool_calling_phase) — the model decides whether to call any of them, and
-if it does, execute_tool_call() runs the real Python function server-side and
-the result is fed back into the model's context before it writes its final
-answer.
+The chat pipeline routes budget arithmetic and seasonal climate lookups
+locally (services/local_context.py), without a separate LLM tool-selection
+request. It reuses its existing KB retrieval for places and itineraries.
+TOOL_SCHEMAS remain available for experiments with model function-calling.
 
 Two of the four (search_places, generate_itinerary) are grounded in the real
 Pinecone knowledge base (services/kb_rag.py) — the same data source the app

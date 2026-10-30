@@ -87,10 +87,20 @@ def relevant_hits(query: str, hits: list[dict], limit: int) -> list[dict]:
     named_places = named_venue_phrases(query)
     query_terms = terms(query)
     timetable_question = bool(re.search(r"\b(?:timetable|departures?|train times?|what time.{0,30}train)\b", query, re.I))
-    stations = sorted(DESTINATIONS | {"maradana", "colombo fort", "beliatta", "kalutara south",
+    stations = sorted((DESTINATIONS - {"sri lanka", "sri lankan"}) | {"maradana", "colombo fort", "beliatta", "kalutara south",
                       "wadduwa", "panadura", "moratuwa", "ambepussa", "mirigama"}, key=len, reverse=True)
     station_pattern = "(?:" + "|".join(map(re.escape, stations)) + ")"
     route = re.search(rf"\b({station_pattern})\s+(?:to|→|->)\s+({station_pattern})\b", query_text)
+    origin_request = re.search(rf"\bfrom\s+({station_pattern})\b", query_text)
+    destination_request = re.search(rf"\bto\s+({station_pattern})\b", query_text)
+    mentioned = []
+    for station in stations:
+        if re.search(r"\b" + re.escape(station) + r"\b", query_text) and not any(
+            re.search(r"\b" + re.escape(station) + r"\b", longer) for longer in mentioned
+        ):
+            mentioned.append(station)
+    def station_matches(requested, actual):
+        return requested == actual or (requested == "colombo" and actual == "colombo fort")
     seen = set()
     accepted = []
     for hit in sorted(hits, key=lambda h: h.get("score") or 0, reverse=True):
@@ -99,14 +109,26 @@ def relevant_hits(query: str, hits: list[dict], limit: int) -> list[dict]:
         score = hit.get("score")
         if not text or not isinstance(score, (int, float)) or not math.isfinite(score) or score < minimum:
             continue
+        if fields.get("route_origin") and not timetable_question:
+            # Preferring train travel is not a request for departure times.
+            # A coastal timetable must not become evidence for a Kandy plan.
+            continue
         if timetable_question:
             # Journey-duration paragraphs and reversed routes cannot support
             # departure times. Only reviewed, direction-labelled rows can.
             if fields.get("extraction_method") != "reviewed_transcription" or not fields.get("route_origin"):
                 continue
-            if route and (normalized(fields.get("route_origin", "")) != route[1]
-                          or normalized(fields.get("route_destination", "")) != route[2]):
+            origin = normalized(fields.get("route_origin", ""))
+            destination = normalized(fields.get("route_destination", ""))
+            if route and (not station_matches(route[1], origin) or not station_matches(route[2], destination)):
                 continue
+            if not route:
+                if origin_request and not station_matches(origin_request[1], origin):
+                    continue
+                if destination_request and not station_matches(destination_request[1], destination):
+                    continue
+                if not all(station_matches(station, origin) or station_matches(station, destination) for station in mentioned):
+                    continue
         if venues:
             # A generic tickets paragraph cannot support a named venue's fee.
             if not any(any(alias in text for alias in venue["aliases"]) for venue in venues):

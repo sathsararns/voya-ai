@@ -32,6 +32,37 @@ beforeEach(() => {
   clearAllCookies()
 })
 
+describe('late session checks cannot replace a newer auth action', () => {
+  const user = { id: 'race-user', name: 'User', email: 'race@example.com', created_at: '2026-01-01T00:00:00Z' }
+
+  it('keeps a successful login when an earlier /me request later returns 401', async () => {
+    let finishCheck!: (value: unknown) => void
+    const pending = new Promise((resolve) => { finishCheck = resolve })
+    global.fetch = vi.fn().mockImplementation((url: string) => {
+      if (url.endsWith('/auth/me')) return pending
+      if (url.endsWith('/auth/login')) return Promise.resolve(jsonResponse(user))
+      return Promise.resolve(jsonResponse({ conversations: [] }))
+    }) as unknown as typeof fetch
+    const checking = useAuthStore.getState().fetchCurrentUser()
+    await useAuthStore.getState().login(user.email, 'Password123')
+    finishCheck({ ok: false, status: 401, json: async () => ({ detail: 'Not authenticated' }) })
+    await checking
+    expect(useAuthStore.getState().user?.id).toBe(user.id)
+    expect(useAuthStore.getState().status).toBe('authenticated')
+  })
+
+  it('does not log the caller back in when a pre-logout /me request arrives late', async () => {
+    let finishCheck!: (value: unknown) => void
+    global.fetch = vi.fn().mockReturnValue(new Promise((resolve) => { finishCheck = resolve })) as unknown as typeof fetch
+    const checking = useAuthStore.getState().fetchCurrentUser()
+    await useAuthStore.getState().logout()
+    finishCheck(jsonResponse(user))
+    await checking
+    expect(useAuthStore.getState().user).toBeNull()
+    expect(useAuthStore.getState().status).toBe('unauthenticated')
+  })
+})
+
 afterEach(() => {
   clearAllCookies()
 })

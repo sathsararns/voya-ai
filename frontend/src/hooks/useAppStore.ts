@@ -23,6 +23,7 @@ interface AppState {
   conversations: Conversation[]
   activeConversationId: string | null
   isLoadingConversations: boolean
+  conversationsUserId: string | null
   setTheme: (theme: Theme) => void
   toggleTheme: () => void
   setSidebarOpen: (open: boolean) => void
@@ -38,6 +39,38 @@ interface AppState {
 
 const SESSION_STORAGE_KEY = 'voya_session_id'
 let cachedSessionId: string | null = null
+let conversationEpoch = 0
+let selectionEpoch = 0
+
+// Only the selected ID is stored locally. Messages and ownership come from
+// the authenticated API, and each account has its own selection.
+function activeChatKey(userId: string): string {
+  return `voya_active_conversation:${userId}`
+}
+
+function rememberActiveChat(userId: string | null, conversationId: string | null): void {
+  if (!userId) return
+  try {
+    window.localStorage.setItem(activeChatKey(userId), conversationId ?? '')
+  } catch {
+    // Server history still works when browser storage is unavailable.
+  }
+}
+
+function restoredChatId(userId: string, conversations: Conversation[]): string | null {
+  try {
+    const saved = window.localStorage.getItem(activeChatKey(userId))
+    if (saved === '') return null // The user deliberately opened New Chat.
+    if (saved && conversations.some((chat) => chat.conversation_id === saved)) return saved
+  } catch {
+    // Fall back to the most recent server-owned conversation.
+  }
+  return conversations[0]?.conversation_id ?? null
+}
+
+function isCurrentAccount(epoch: number, userId: string | null): boolean {
+  return epoch === conversationEpoch && (useAuthStore.getState().user?.id ?? null) === userId
+}
 
 // Cinematic typewriter reveal for a streaming assistant message — tune
 // these together to make the effect faster/slower/pausier without
@@ -314,38 +347,20 @@ export const useAppStore = create<AppState>((set, get) => ({
   conversations: [],
   activeConversationId: null,
   isLoadingConversations: false,
+  conversationsUserId: null,
 
   setTheme: (theme) => set({ theme }),
   toggleTheme: () => set({ theme: get().theme === 'light' ? 'dark' : 'light' }),
   setSidebarOpen: (sidebarOpen) => set({ sidebarOpen }),
   setActiveNav: (activeNav) => set({ activeNav, sidebarOpen: false }),
 
-  // Runs once on app start (and again every time ChatApp mounts — i.e.
-  // every fresh login, since navigating to /login and back necessarily
-  // unmounts/remounts it) to load this browser's conversation list for the
-  // sidebar. NEVER auto-restores a previous conversation as active — app
-  // start/refresh always lands on the blank welcome/composer state. A
-  // conversation only ever becomes active when the user explicitly clicks
-  // one in Recent Chats (selectConversation) or sends a first message
-  // (send(), which lazily creates one).
-  //
-  // Clears conversations/messages/activeConversationId SYNCHRONOUSLY,
-  // before the fetch even starts — this is what stops one account's Recent
-  // Chats from being visible, even briefly, right after switching to a
-  // different account in the same browser tab. Without this, the previous
-  // account's list would stay in this store (a separate Zustand store from
-  // useAuthStore, so logging out never touched it) until the new fetch
-  // resolved — or indefinitely, if that fetch ever failed, since the old
-  // code's catch block only cleared loading flags, not the stale list
-  // itself.
-  //
-  // Guards against a concurrent call with an early return — useAuthStore's
-  // subscription (see useAuthStore.ts) and ChatApp's own mount effect can
-  // both call this within the same tick right after a login, and running
-  // the fetch twice in parallel is wasted work, not a correctness issue,
-  // but worth skipping.
+  // Login/reload restores this account's selection after fetching its own
+  // server history. Auth subscription + ChatApp mount share this initialization.
   initConversations: async () => {
-    if (get().isLoadingConversations) return
+    const userId = useAuthStore.getState().user?.id ?? null
+    if (get().isLoadingConversations || (userId && get().conversationsUserId === userId)) return
+    const epoch = conversationEpoch
+    const selection = selectionEpoch
 
     set({
       conversations: [],
@@ -357,25 +372,33 @@ export const useAppStore = create<AppState>((set, get) => ({
 
     try {
       const conversations = await apiListConversations()
+      if (!isCurrentAccount(epoch, userId)) return
       set({
         conversations,
+        conversationsUserId: userId,
         isLoadingConversations: false,
-        activeConversationId: null,
-        messages: [],
         isLoadingHistory: false,
       })
+      if (userId && selection === selectionEpoch) {
+        const restoreId = restoredChatId(userId, conversations)
+        if (restoreId) await get().selectConversation(restoreId)
+      }
     } catch {
       // Backend unreachable — stay on the empty state already set above
       // (never fall back to a stale, possibly-another-account's list) so
       // the composer still works locally.
-      set({ isLoadingHistory: false, isLoadingConversations: false })
+      if (isCurrentAccount(epoch, userId)) {
+        set({ isLoadingHistory: false, isLoadingConversations: false })
+      }
     }
   },
 
   refreshConversations: async () => {
+    const epoch = conversationEpoch
+    const userId = useAuthStore.getState().user?.id ?? null
     try {
       const conversations = await apiListConversations()
-      set({ conversations })
+      if (isCurrentAccount(epoch, userId)) set({ conversations })
     } catch (error) {
       // Best effort — the sidebar just keeps its last known list. This
       // used to swallow the error completely, which made a genuine
@@ -392,12 +415,17 @@ export const useAppStore = create<AppState>((set, get) => ({
   // remounting (which re-triggers initConversations) would still have this
   // store holding the previous account's conversations/messages.
   resetConversations: () => {
+    get().stopGenerating()
+    conversationEpoch += 1
+    selectionEpoch += 1
     set({
       conversations: [],
       messages: [],
       activeConversationId: null,
       isLoadingConversations: false,
       isLoadingHistory: false,
+      isResponding: false,
+      conversationsUserId: null,
     })
   },
 
@@ -407,13 +435,20 @@ export const useAppStore = create<AppState>((set, get) => ({
       return
     }
 
-    set({ activeConversationId: conversationId, sidebarOpen: false, isLoadingHistory: true })
+    get().stopGenerating()
+    const epoch = conversationEpoch
+    const selection = ++selectionEpoch
+    const userId = useAuthStore.getState().user?.id ?? null
+    const isCurrent = () => isCurrentAccount(epoch, userId) && selection === selectionEpoch
+    set({ activeConversationId: conversationId, messages: [], sidebarOpen: false, isLoadingHistory: true, isResponding: false })
 
     try {
       const history = await apiGetConversationMessages(conversationId)
+      if (!isCurrent()) return
       set({ messages: toMessages(history), isLoadingHistory: false })
+      rememberActiveChat(userId, conversationId)
     } catch {
-      set({ messages: [], isLoadingHistory: false })
+      if (isCurrent()) set({ activeConversationId: null, messages: [], isLoadingHistory: false })
     }
   },
 
@@ -421,12 +456,16 @@ export const useAppStore = create<AppState>((set, get) => ({
   // conversation. No backend call — nothing is persisted until the user
   // actually sends a message (send() lazily creates the conversation then).
   newChat: () => {
+    get().stopGenerating()
+    selectionEpoch += 1
+    rememberActiveChat(useAuthStore.getState().user?.id ?? null, null)
     set({
       isResponding: false,
       sidebarOpen: false,
       activeNav: 'home',
       messages: [],
       activeConversationId: null,
+      isLoadingHistory: false,
     })
   },
 
@@ -462,6 +501,10 @@ export const useAppStore = create<AppState>((set, get) => ({
     }
 
     const stamp = Date.now()
+    const epoch = conversationEpoch
+    const selection = selectionEpoch
+    const userId = useAuthStore.getState().user?.id ?? null
+    const isCurrent = () => isCurrentAccount(epoch, userId) && selection === selectionEpoch
     const sessionId = getOrCreateSessionId()
     let conversationId = get().activeConversationId
 
@@ -498,6 +541,7 @@ export const useAppStore = create<AppState>((set, get) => ({
     let revealedLength = 0
     let typewriterTimer: ReturnType<typeof setTimeout> | null = null
     let doneData: ChatResponse | null = null
+    let savedReply = false
     let finalized = false
     let resolveRevealComplete: () => void = () => {}
     const revealComplete = new Promise<void>((resolve) => {
@@ -519,6 +563,10 @@ export const useAppStore = create<AppState>((set, get) => ({
       if (finalized) return
       finalized = true
       stopTypewriter()
+      if (!isCurrent()) {
+        resolveRevealComplete()
+        return
+      }
       const assistantText = formatAssistantReply(data)
       set((state) => ({
         isResponding: false,
@@ -533,6 +581,10 @@ export const useAppStore = create<AppState>((set, get) => ({
 
     const revealTick = () => {
       typewriterTimer = null
+      if (!isCurrent()) {
+        resolveRevealComplete()
+        return
+      }
       if (revealedLength >= targetText.length) {
         // Caught up with everything that has arrived so far. If the
         // authoritative `done` payload is already in hand, that means the
@@ -617,14 +669,17 @@ export const useAppStore = create<AppState>((set, get) => ({
         },
         {
           onToken: (chunk) => {
+            if (!isCurrent()) return
             targetText += chunk
             if (typewriterTimer === null) {
               typewriterTimer = setTimeout(revealTick, TYPEWRITER_INTERVAL_MS)
             }
           },
           onDone: (rawData) => {
+            if (!isCurrent()) return
             const data = rawData as ChatResponse
             doneData = data
+            savedReply = !data.error_code
 
             // Covers the rare case where no conversation existed yet and
             // the backend created one on the fly.
@@ -639,7 +694,8 @@ export const useAppStore = create<AppState>((set, get) => ({
             // the typewriter animation to finish catching up (that can take
             // a while longer for a long reply). See
             // upsertConversationOptimistically's own comment for why.
-            if (conversationId) {
+            if (conversationId && !data.error_code) {
+              rememberActiveChat(userId, conversationId)
               const currentConversationId = conversationId
               set((state) => ({
                 conversations: upsertConversationOptimistically(state.conversations, currentConversationId, sessionId, text),
@@ -671,6 +727,7 @@ export const useAppStore = create<AppState>((set, get) => ({
         { headers: authExpectationHeaders(), signal: controller.signal },
       )
 
+      if (!isCurrent()) return
       if (doneData) {
         // The network side is done, but the on-screen animation may still
         // be mid-reveal — wait for it to actually finish (finalizeMessage)
@@ -696,6 +753,7 @@ export const useAppStore = create<AppState>((set, get) => ({
         }))
       }
 
+      if (!isCurrent()) return
       // Reconciles with the server's exact state afterward (the real
       // title text vs. this file's mirrored truncation, the precise
       // updated_at, etc.) — awaited so it's still a deterministic part of
@@ -704,6 +762,7 @@ export const useAppStore = create<AppState>((set, get) => ({
       // that. isResponding is already false by this point, so none of
       // this delays the message itself appearing "sent" to the user.
       await get().refreshConversations()
+      if (!isCurrent()) return
 
       // refreshConversations() does a full replace (set({ conversations })),
       // not a merge — if that response ever comes back without the
@@ -713,7 +772,7 @@ export const useAppStore = create<AppState>((set, get) => ({
       // to improve on it. This is the actual guarantee: whatever the
       // reconciliation step returns, the just-sent conversation can never
       // regress to "not there" as a result of it.
-      if (conversationId && !get().conversations.some((c) => c.conversation_id === conversationId)) {
+      if (conversationId && savedReply && !get().conversations.some((c) => c.conversation_id === conversationId)) {
         set((state) => ({
           conversations: upsertConversationOptimistically(state.conversations, conversationId!, sessionId, text),
         }))
@@ -724,6 +783,7 @@ export const useAppStore = create<AppState>((set, get) => ({
       // could fire afterward and overwrite whatever this catch block is
       // about to set `content` to with a stale, partially-revealed value.
       stopTypewriter()
+      if (!isCurrent()) return
 
       if (error instanceof ApiAbortError) {
         // The user clicked Stop (see stopGenerating below) — not a

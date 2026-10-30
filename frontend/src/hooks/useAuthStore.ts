@@ -27,6 +27,7 @@ interface AuthState {
 // per-origin session cookie underneath it already has (logging in
 // elsewhere overwrites the one httpOnly cookie every tab sends).
 const AUTH_SYNC_KEY = 'voya_auth_sync'
+let authVersion = 0
 
 function notifyOtherTabs(): void {
   try {
@@ -47,27 +48,42 @@ export const useAuthStore = create<AuthState>((set) => ({
   // already has a valid session. Also re-called (see the storage listener
   // below) whenever another tab signals that the session cookie changed.
   fetchCurrentUser: async () => {
+    const version = ++authVersion
     set({ status: 'loading' })
     try {
       const user = await api.get<AuthUser>('/api/v1/auth/me')
-      set({ user, status: 'authenticated' })
+      if (version === authVersion) set({ user, status: 'authenticated' })
     } catch {
-      set({ user: null, status: 'unauthenticated' })
+      if (version === authVersion) set({ user: null, status: 'unauthenticated' })
     }
   },
 
   // Signup creates the account and signs the caller in immediately — no
   // email-verification step, so the response is already a logged-in user.
   signup: async (name, email, password) => {
-    const user = await api.post<AuthUser>('/api/v1/auth/signup', { name, email, password })
-    set({ user, status: 'authenticated' })
-    notifyOtherTabs()
+    const version = ++authVersion
+    try {
+      const user = await api.post<AuthUser>('/api/v1/auth/signup', { name, email, password })
+      if (version !== authVersion) return
+      set({ user, status: 'authenticated' })
+      notifyOtherTabs()
+    } catch (error) {
+      if (version === authVersion) set({ user: null, status: 'unauthenticated' })
+      throw error
+    }
   },
 
   login: async (email, password) => {
-    const user = await api.post<AuthUser>('/api/v1/auth/login', { email, password })
-    set({ user, status: 'authenticated' })
-    notifyOtherTabs()
+    const version = ++authVersion
+    try {
+      const user = await api.post<AuthUser>('/api/v1/auth/login', { email, password })
+      if (version !== authVersion) return
+      set({ user, status: 'authenticated' })
+      notifyOtherTabs()
+    } catch (error) {
+      if (version === authVersion) set({ user: null, status: 'unauthenticated' })
+      throw error
+    }
   },
 
   forgotPassword: async (email) => {
@@ -79,6 +95,7 @@ export const useAuthStore = create<AuthState>((set) => ({
   },
 
   logout: async () => {
+    const version = ++authVersion
     try {
       // No CSRF cookie means there's no real session cookie pair to revoke
       // in the first place (verify_csrf on the backend would reject the
@@ -91,17 +108,13 @@ export const useAuthStore = create<AuthState>((set) => ({
         await api.post('/api/v1/auth/logout')
       }
     } finally {
-      // Clear local state even if the network call fails — the user
-      // clicked logout, so the UI should reflect "logged out" regardless.
-      set({ user: null, status: 'unauthenticated' })
-      notifyOtherTabs()
-      // Explicit, unconditional reset — not just relying on the
-      // subscription below. If logout() is ever called while `user` was
-      // already null (a stale/redundant call), there's no actual identity
-      // transition for the subscription to react to, so it wouldn't fire
-      // on its own; logout() clicked at all should still guarantee a clean
-      // chat store regardless of what state things were already in.
-      useAppStore.getState().resetConversations()
+      // A completed logout must not erase a newer authentication action.
+      if (version === authVersion) {
+        set({ user: null, status: 'unauthenticated' })
+        notifyOtherTabs()
+        // Reset even if user was already null and the subscription did not fire.
+        useAppStore.getState().resetConversations()
+      }
     }
   },
 }))

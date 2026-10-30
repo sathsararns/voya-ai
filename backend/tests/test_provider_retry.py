@@ -155,7 +155,8 @@ def test_timeout_message_is_distinct_from_invalid_generation(provider):
 
 
 @pytest.mark.parametrize("streaming", [False, True])
-def test_failed_generation_never_becomes_chat_history_or_saved_preferences(monkeypatch, streaming):
+@pytest.mark.parametrize("error_code", ["rate_limited", "validation_failed"])
+def test_failed_generation_never_becomes_chat_history_or_saved_preferences(monkeypatch, streaming, error_code):
     monkeypatch.setattr(routes, "get_or_create_conversation", lambda *_a, **_k: SimpleNamespace(conversation_id="test"))
     monkeypatch.setattr(routes, "count_conversation_messages", lambda *_: 0)
     save = MagicMock()
@@ -164,7 +165,7 @@ def test_failed_generation_never_becomes_chat_history_or_saved_preferences(monke
     monkeypatch.setattr(routes, "save_chat", save)
     monkeypatch.setattr(routes, "_learn_preferences", learn)
     monkeypatch.setattr(routes, "save_memory", memory)
-    reply = groq_service._fallback_reply("Temporarily busy.", "rate_limited", 5)
+    reply = groq_service._fallback_reply("Unable to complete.", error_code, 5)
     monkeypatch.setattr(routes, "get_groq_reply", lambda *_a, **_k: reply)
     def stream(*args, **kwargs):
         yield "done", reply
@@ -178,9 +179,9 @@ def test_failed_generation_never_becomes_chat_history_or_saved_preferences(monke
         response = routes.chat_stream(request, Connected(), db=object(), current_user=user)
         async def consume():
             return "".join([chunk async for chunk in response.body_iterator])
-        assert "rate_limited" in asyncio.run(consume())
+        assert error_code in asyncio.run(consume())
     else:
-        assert routes.chat(request, db=object(), current_user=user)["error_code"] == "rate_limited"
+        assert routes.chat(request, db=object(), current_user=user)["error_code"] == error_code
     save.assert_not_called()
     learn.assert_not_called()
     memory.assert_not_called()

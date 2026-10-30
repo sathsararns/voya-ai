@@ -20,14 +20,20 @@ response — same lightweight philosophy as context_router.py.
 """
 
 import re
+import logging
 from typing import Any, Callable, Dict, List
 
 from json_utils import CHAT_RESPONSE_DEFAULTS
 from services.context_router import is_options_request
 from services.answer_policy import non_trip_answer
-from services.budget import resolve_budget_cap, validate_budget_presentation, validate_budget_origin
+from services.budget import resolve_budget_cap, validate_budget_presentation, validate_budget_origin, validate_saved_budget_request, validate_budget_feasibility
+from services.trip_constraints import stated_days
 from services.destination_spelling import validate_destination_spelling
 from services.planning_context import validate_planning_context
+from services.transport_policy import validate_transport_claims
+from services.trip_state import scoped_trip_history, validate_followup_identity
+
+logger = logging.getLogger(__name__)
 from services.fee_policy import validate_fee_claims
 from services.venue_facts import validate_required_venues, validate_venue_placement
 from services.itinerary_edits import validate_attraction_addition
@@ -42,9 +48,6 @@ KNOWN_DESTINATIONS = [
     "dambulla", "yala", "udawalawe", "negombo", "hikkaduwa", "arugam bay",
     "kalpitiya", "kitulgala", "matara", "batticaloa",
 ]
-
-_DAY_COUNT_RE = re.compile(r"(\d{1,2})\s*-?\s*day")
-
 
 def validate_schema(data: dict) -> List[str]:
     """Type-check the top-level ChatResponse fields."""
@@ -145,9 +148,8 @@ def matches_request(user_message: str, data: dict, budget_cap_lkr=None) -> List[
         # and budgets. Do not apply one trip's scalar constraints to them.
         return issues
 
-    day_match = _DAY_COUNT_RE.search(lower_message)
-    if day_match:
-        requested_days = int(day_match.group(1))
+    requested_days = stated_days(user_message)
+    if requested_days is not None and (data.get("itinerary") or data.get("days") is not None):
         if data.get("days") != requested_days:
             issues.append(
                 f"user asked for {requested_days} days but response has days={data.get('days')}"
@@ -187,6 +189,7 @@ def matches_request(user_message: str, data: dict, budget_cap_lkr=None) -> List[
 def _fallback_response(data: dict, budget_cap_lkr=None, issues=()) -> Dict[str, Any]:
     """Do not return prose or activities that failed semantic validation."""
     safe = dict(CHAT_RESPONSE_DEFAULTS)
+    safe["error_code"] = "validation_failed"
     if budget_cap_lkr is not None:
         budget_failed = any("budget_lkr" in issue or "budget cap" in issue for issue in issues)
         safe["summary"] = (
@@ -194,13 +197,9 @@ def _fallback_response(data: dict, budget_cap_lkr=None, issues=()) -> Dict[str, 
             if budget_failed else "I couldn't validate a consistent itinerary for that request."
         )
         safe["budget_cap_lkr"] = budget_cap_lkr
-        safe["follow_up_question"] = (
-            "Could you share your travel dates, number of travellers and number of nights "
-            "so I can revise the estimates?"
-        )
     else:
         safe["summary"] = "I couldn't produce a reliable plan for that request."
-        safe["follow_up_question"] = "Could you share your travel dates and starting point so I can revise it?"
+    safe["follow_up_question"] = None
     return safe
 
 
@@ -217,29 +216,44 @@ def repair_or_retry(
     back to a safe response rather than ever returning invalid data.
     """
     attempt = 0
+    history = scoped_trip_history(user_message, history)
     budget_cap_lkr = resolve_budget_cap(user_message, history)
 
     while True:
         issues = validate_schema(data)
+        failed_checks = ["schema"] if issues else []
         if not issues:
             issues = validate_itinerary(data)
+            failed_checks = ["itinerary"] if issues else []
         if not issues:
             # Return all semantic problems in one correction round. Fixing
             # only the first issue can leave another one after the sole retry.
-            issues.extend(matches_request(user_message, data, budget_cap_lkr))
-            issues.extend(validate_fee_claims(data))
-            issues.extend(validate_budget_presentation(data, history))
-            issues.extend(validate_venue_placement(data, KNOWN_DESTINATIONS))
-            issues.extend(validate_required_venues(user_message, data, history))
-            issues.extend(validate_attraction_addition(user_message, data, history))
-            issues.extend(validate_destination_spelling(user_message, data, KNOWN_DESTINATIONS, history))
-            issues.extend(validate_budget_origin(data, budget_cap_lkr, user_preferences))
-            issues.extend(validate_planning_context(user_message, data, history))
+            checks = [
+                ("request", lambda: matches_request(user_message, data, budget_cap_lkr)),
+                ("fees", lambda: validate_fee_claims(data)),
+                ("budget_presentation", lambda: validate_budget_presentation(data, history)),
+                ("venue_placement", lambda: validate_venue_placement(data, KNOWN_DESTINATIONS)),
+                ("required_venues", lambda: validate_required_venues(user_message, data, history)),
+                ("attraction_addition", lambda: validate_attraction_addition(user_message, data, history)),
+                ("destination_spelling", lambda: validate_destination_spelling(user_message, data, KNOWN_DESTINATIONS, history)),
+                ("budget_origin", lambda: validate_budget_origin(data, budget_cap_lkr, user_preferences)),
+                ("budget_feasibility", lambda: validate_budget_feasibility(data, budget_cap_lkr)),
+                ("planning_context", lambda: validate_planning_context(user_message, data, history)),
+                ("transport", lambda: validate_transport_claims(data)),
+                ("followup_identity", lambda: validate_followup_identity(user_message, data, history)),
+                ("saved_budget_request", lambda: validate_saved_budget_request(user_message, data, user_preferences, history)),
+            ]
+            for name, check in checks:
+                found = check()
+                if found:
+                    failed_checks.append(name)
+                    issues.extend(found)
 
         if not issues:
             return data
 
         if attempt >= max_retries:
+            logger.warning("response_validation_failed checks=%s retries=%s", ",".join(failed_checks), attempt)
             return _fallback_response(data, budget_cap_lkr, issues)
 
         attempt += 1

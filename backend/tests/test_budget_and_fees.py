@@ -99,7 +99,8 @@ def test_failed_retry_cannot_salvage_an_overbudget_plan():
 
 
 def test_followup_cannot_raise_a_previously_set_budget():
-    history = [{"role": "user", "content": "My budget is LKR 45000"}]
+    history = [{"role": "user", "content": "My budget is LKR 45000"},
+               {"role": "assistant", "content": json.dumps({**PLAN, "budget_cap_lkr": 45000})}]
     bad = {**PLAN, "budget_lkr": 50000}
     retry = MagicMock(return_value=copy.deepcopy(PLAN))
     result = validate_ai_response("Make day 2 relaxed", bad, retry, history=history)

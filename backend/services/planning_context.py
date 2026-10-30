@@ -5,6 +5,8 @@ import re
 
 from services.context_router import DESTINATIONS, is_options_request
 from services.answer_policy import non_trip_answer
+from services.trip_state import last_plan, scoped_trip_history
+from services.trip_constraints import NUMBER_PATTERN, NIGHT_COUNT_RE, parse_number, stated_days, stated_nights
 
 _PLACES = sorted(DESTINATIONS | {"maradana", "colombo fort", "peradeniya"}, key=len, reverse=True)
 _PLACE = "(?:" + "|".join(map(re.escape, _PLACES)) + ")"
@@ -15,12 +17,8 @@ _ORIGIN_PATTERNS = [
     r"\b(?:i am|i'm|we are|we're)\s+(?:currently\s+)?(?:in|based in)\s+(?P<place>[A-Za-z][A-Za-z '-]{1,65}?)" + _STOP,
     rf"\bfrom\s+(?P<place>{_PLACE})\b",
 ]
-_NUMBER = r"(?:\d{1,2}|one|two|three|four|five|six|seven|eight|nine|ten)"
-_NUMBERS = dict(zip("one two three four five six seven eight nine ten".split(), range(1, 11)))
-
-
-def _number(value: str) -> int:
-    return _NUMBERS[value.lower()] if value.lower() in _NUMBERS else int(value)
+_NUMBER = NUMBER_PATTERN
+_number = parse_number
 
 
 def stated_origin(text: str):
@@ -62,6 +60,7 @@ def _stated_party(text: str):
 
 
 def planning_context(message: str, history=None, days=None) -> dict:
+    history = scoped_trip_history(message, history)
     facts = {}
     unknown = set()
     # Trust only user-sourced fields in prior server metadata. An assumed
@@ -93,9 +92,9 @@ def planning_context(message: str, history=None, days=None) -> dict:
         party = _stated_party(text)
         if party is not None and party > 0:
             facts["travellers"] = party
-        nights = re.search(rf"\b(?P<n>{_NUMBER})\s+nights?\b", text, re.I)
-        if nights:
-            facts["nights"] = _number(nights["n"])
+        nights = stated_nights(text)
+        if nights is not None:
+            facts["nights"] = nights
         date = re.search(
             r"\b20\d{2}-\d{2}-\d{2}\b(?:\s*(?:to|until|through)\s*20\d{2}-\d{2}-\d{2}\b)?"
             r"|\b(?:\d{1,2}\s+)?(?:January|February|March|April|May|June|July|August|September|October|November|December)\s+\d{1,4}(?:,?\s+20\d{2})?\b"
@@ -109,8 +108,16 @@ def planning_context(message: str, history=None, days=None) -> dict:
             facts.pop("starting_point", None)
             unknown.add("starting_point")
     if days is None:
-        match = re.search(r"\b(\d{1,2})\s*-?\s*days?\b", message, re.I)
-        days = int(match[1]) if match else None
+        days = stated_days(message)
+    requested_days = stated_days(message)
+    previous = last_plan(history)
+    explicit_nights = stated_nights(message)
+    keep_nights = re.search(r"\b(?:keep|retain|same|unchanged)\b[^.!?\n]{0,60}\b(?:nights?|overnight)\b", message, re.I)
+    if (previous and requested_days is not None and previous.get("days") != requested_days
+            and explicit_nights is None and not keep_nights and "nights" not in unknown):
+        # A new duration without an explicit overnight constraint needs a
+        # fresh, disclosed default, not an obsolete user fact from the old plan.
+        facts.pop("nights", None)
     defaults = {"starting_point": "Colombo", "travellers": 1,
                 "nights": max(days - 1, 0) if type(days) is int else None, "dates": None}
     result = {}
@@ -166,6 +173,13 @@ def validate_planning_context(message: str, data: dict, history=None) -> list[st
         return []
     context = planning_context(message, history, data.get("days"))
     issues = []
+    summary = data.get("summary", "")
+    for match in NIGHT_COUNT_RE.finditer(summary):
+        if context["nights"] is not None and _number(match["n"]) != context["nights"]:
+            issues.append(f"Summary says {match['n']} nights but the planning context has {context['nights']}. Keep overnight stays consistent or ask the user to change them.")
+    party = _stated_party(summary)
+    if party is not None and context["travellers"] is not None and party != context["travellers"]:
+        issues.append(f"Summary describes {party} travellers but the planning party is {context['travellers']}. Keep the stated party unchanged.")
     # Check the first explicit departure, not later transfers between stops.
     for item in data["itinerary"][0]["items"]:
         if re.search(r"\b(?:train|bus|travel|depart|drive|leave|flight|transfer)\b", item, re.I):

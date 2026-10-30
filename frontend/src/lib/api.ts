@@ -94,6 +94,7 @@ async function request<T>(path: string, options: RequestInit = {}): Promise<T> {
       method,
       headers,
       credentials: 'include',
+      cache: 'no-store',
     })
   } catch {
     throw new ApiNetworkError(url)
@@ -222,6 +223,7 @@ export async function streamPost(
       method: 'POST',
       headers: requestHeaders,
       credentials: 'include',
+      cache: 'no-store',
       body: JSON.stringify(body),
       signal,
     })

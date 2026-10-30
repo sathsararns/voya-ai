@@ -8,8 +8,7 @@ Three layers, matching this project's existing split in style:
     search_places/generate_itinerary — consistent with how this project
     tests kb_rag.py elsewhere, see tests/test_app_flows.py).
   - Unit tests for context_router.py's candidate_tools gating — proving the
-    model is only ever offered a relevant, scoped menu of tools, not all
-    four for every message.
+    router only flags relevant capabilities for each message.
   - Integration tests against the real FastAPI app (real Groq, real
     Postgres) proving: the assistant can call a tool, a non-tool message is
     completely unaffected, streaming still works with tool-calling enabled,
@@ -177,13 +176,8 @@ def _parse_sse(raw_text: str) -> List[Tuple[str, str]]:
     return events
 
 
-# A deliberately unambiguous request: the ONLY plausible tool for it (per
-# context_router's own keyword gating, "budget"/"how much"/etc.) is
-# calculate_budget, and it's exactly what calculate_budget does — chosen to
-# make the model's tool_choice="auto" decision as close to certain as a real
-# LLM call can be, while still being a genuine agentic decision, not a
-# forced one (see groq_service.py's _run_tool_calling_phase: tool_choice is
-# always "auto", never a specific forced tool).
+# Explicit days and a trip total let the local budget tool run without
+# a separate model argument-selection request.
 BUDGET_TOOL_MESSAGE = "I have exactly 45000 LKR for a 3 day trip. Please calculate a detailed budget breakdown for me."
 
 
@@ -208,8 +202,7 @@ class TestToolCallingEndToEnd:
         data = response.json()
 
         # No tool keywords in "Hi there!" -> context_router offers nothing
-        # -> no extra Groq round trip happens at all (see
-        # _run_tool_calling_phase's `if not candidate_tools: return "", []`).
+        # -> no local tool context is needed.
         assert data["tools_used"] == []
         assert data["summary"]
 

@@ -4,13 +4,6 @@ import { useAppStore } from '../hooks/useAppStore'
 import { AnimatePresence, motion } from 'framer-motion'
 import { Loader2Icon } from 'lucide-react'
 
-function greeting(): string {
-  const hour = new Date().getHours()
-  if (hour < 12) return 'Good Morning'
-  if (hour < 18) return 'Good Afternoon'
-  return 'Good Evening'
-}
-
 export function Home() {
   const isLoadingHistory = useAppStore((s) => s.isLoadingHistory)
   const hasThread = useAppStore((s) => s.messages.length > 0)
@@ -68,10 +61,7 @@ export function Home() {
                     'radial-gradient(circle at 30% 26%, #d9cbff 0%, #9c7bff 45%, #6d28d9 100%)',
                 }}
               />
-              <p className="mt-7 text-base font-medium text-muted sm:text-lg">
-                {greeting()} 👋
-              </p>
-              <h1 className="mt-1 font-display text-[32px] font-bold tracking-tight text-ink sm:text-[42px]">
+              <h1 className="mt-7 font-display text-[32px] font-bold tracking-tight text-ink sm:text-[42px]">
                 Where To <span className="text-ink">Next?</span>
               </h1>
               <p className="mt-4 max-w-xl text-[15px] leading-6 text-muted">

@@ -1,12 +1,75 @@
 services:
+  frontend:
+    build: ./frontend
+    ports:
+      - "127.0.0.1:8080:80"
+    depends_on:
+      backend:
+        condition: service_healthy
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "wget", "-q", "--spider", "http://127.0.0.1/healthz"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  backend:
+    build: ./backend
+    env_file:
+      - path: ./backend/.env
+        format: raw
+    environment:
+      # Container DNS replaces the host-only URLs in backend/.env.
+      DATABASE_URL: postgresql+psycopg2://voya:voya_local_dev@postgres:5432/voya
+      REDIS_URL: redis://redis:6379/0
+      FRONTEND_ORIGIN: http://localhost:8080,http://127.0.0.1:8080
+      APP_ENV: development
+    ports:
+      - "127.0.0.1:8000:8000"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health', timeout=4)"]
+      interval: 10s
+      timeout: 5s
+      start_period: 30s
+      retries: 5
+
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      # Local development credentials; the database has no published host port.
+      POSTGRES_DB: voya
+      POSTGRES_USER: voya
+      POSTGRES_PASSWORD: voya_local_dev
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U voya -d voya"]
+      interval: 5s
+      timeout: 5s
+      retries: 12
+
   redis:
     image: redis:7-alpine
     container_name: voya-redis
     ports:
-      - "6379:6379"
+      - "127.0.0.1:6379:6379"
     volumes:
       - redis_data:/data
     command: ["redis-server", "--save", "60", "1"]
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 12
 
 volumes:
+  postgres_data:
   redis_data:

@@ -1,203 +1,169 @@
-# Voya AI — Travel Copilot Platform
+# Voya AI
 
-Voya AI is a full-stack AI travel assistant. Users chat in natural language and get personalized, day-by-day trip itineraries grounded in travel documents, seasonal climate references and estimated budget allocations. The assistant remembers travel preferences across sessions and progressively reveals validated replies in the chat interface.
+A Sri Lanka travel assistant that turns a conversation into a day-by-day itinerary, with budget planning, document references and account-specific preferences.
 
-## Tech Stack
+Built as a portfolio project to demonstrate a complete React/FastAPI application: authentication, persistent chat, retrieval-augmented generation (RAG), structured AI output, validation and Docker deployment.
 
-**Frontend** — React 19, TypeScript, Vite, Tailwind CSS, Framer Motion, Zustand, React Router, React Hook Form + Zod, Vitest + React Testing Library.
+## Preview
 
-**Backend** — FastAPI, SQLAlchemy + Alembic, PostgreSQL, Redis, Pinecone (vector search / RAG), Groq API (LLM + function-calling), PyJWT, Argon2, pytest.
+Actual screenshots from the local Docker app, using a temporary demo account.
 
-## Project Structure
+![Voya AI chat home with sidebar and message composer](docs/screenshots/chat-home.png)
 
-```
-voya-ai/
-├── backend/
-│   ├── main.py              # FastAPI app entrypoint, CORS, startup checks
-│   ├── db/                  # SQLAlchemy models, session, schema bootstrap
-│   ├── alembic/              # Database migrations
-│   ├── routes/               # API endpoints (auth, chat)
-│   ├── services/             # Business logic (Groq, Pinecone, tools, preferences, tokens)
-│   ├── schemas/               # Pydantic request/response models
-│   └── tests/                 # pytest suite
-├── frontend/
-│   ├── src/
-│   │   ├── components/        # UI components (chat thread, composer, sidebar, etc.)
-│   │   ├── pages/              # Route-level pages (login, signup, settings, ...)
-│   │   ├── hooks/               # Zustand stores (app state, auth state)
-│   │   ├── lib/                  # API client
-│   │   └── types/                 # Shared TypeScript types
-│   └── tests/                      # Vitest suite
-└── docker-compose.yml          # Local Redis
-```
+![Voya AI account travel preferences](docs/screenshots/preferences.png)
 
-## Prerequisites
+## What it does
 
-- Python 3.11+
-- Node.js 18+
-- PostgreSQL (a running instance/database you can point `DATABASE_URL` at)
-- Docker (for running Redis locally via `docker-compose.yml`)
-- API keys: [Groq](https://console.groq.com/) and [Pinecone](https://www.pinecone.io/)
+- Builds Sri Lanka itineraries and revises them through follow-up messages while preserving trip constraints.
+- Retrieves travel-guide and dated timetable passages from Pinecone, then shows friendly source titles.
+- Enforces stated total budget caps and calculates a category breakdown with exact arithmetic. Amounts are planning allowances, not booking quotes.
+- Discloses assumed starting points, party size, nights and missing travel dates. Unsupported entrance fees and transport claims are checked before display.
+- Stores chats in PostgreSQL and restores the selected conversation after login or refresh.
+- Keeps saved preferences and persistent vector memory separate for each authenticated account; trip-only instructions can opt out of preference learning.
+- Uses JWT session cookies, CSRF checks and Redis-backed authentication limits.
+- Reveals validated replies progressively across summaries, itinerary cards and budget tables.
 
-## Environment Variables
+## Run locally with Docker
 
-### Backend — `backend/.env`
+Requirements: Docker Desktop with Linux containers, Docker Compose **2.30+**, internet access, and your own Groq and Pinecone credentials.
 
-| Variable | Required | Description |
-|---|---|---|
-| `DATABASE_URL` | Yes | PostgreSQL connection string. |
-| `JWT_SECRET_KEY` | Yes | Secret used to sign access tokens. |
-| `GROQ_API_KEY` | Yes | Groq API key, used for LLM chat completion and tool-calling. |
-| `PINECONE_API_KEY` | Yes | Pinecone API key, used for the travel knowledge-base vector search. |
-| `PINECONE_INDEX_HOST` | Yes | Host URL of your Pinecone index. |
-| `REDIS_URL` | No | Defaults to `redis://localhost:6379/0` (matches `docker-compose.yml`). |
-| `FRONTEND_ORIGIN` | No | Comma-separated allowed CORS origins. Defaults to common local Vite ports. |
-| `APP_ENV` | No | Defaults to `development`. Set to `production` to enable secure (`HTTPS`-only) cookies. |
-| `RESEND_API_KEY` / `RESEND_FROM_EMAIL` | No | Needed only for password-reset emails. |
+1. From the repository root, copy the example configuration once:
 
-### Frontend — `frontend/.env.local`
+   ```powershell
+   if (-not (Test-Path backend/.env)) { Copy-Item backend/.env.example backend/.env }
+   ```
 
-| Variable | Required | Description |
-|---|---|---|
-| `VITE_API_BASE_URL` | No | Defaults to `http://127.0.0.1:8000`. Override if the backend runs elsewhere. |
+   If `backend/.env` already exists, keep it. Set `GROQ_API_KEY`, `PINECONE_API_KEY`, `PINECONE_INDEX_HOST` and a long random `JWT_SECRET_KEY`. Keep values unquoted because Compose uses raw env-file mode. Never commit the completed file.
 
-## Setup & Run
+2. Start the app:
 
-### 1. Start Redis
+   ```powershell
+   docker compose up -d --build
+   ```
 
-```bash
-docker compose up -d redis
+3. Open **[localhost:8080](http://localhost:8080)** and sign up. Check service readiness with `docker compose ps`. The first build takes longer while dependencies download.
+
+Compose starts Nginx/frontend, FastAPI, PostgreSQL and Redis, including database migrations. It uses a separate Docker database; existing host PostgreSQL accounts and chats are not imported automatically.
+
+### Set up the travel knowledge base
+
+Use a Pinecone index with integrated text embeddings and its field map set to `text`. Supply its host in `PINECONE_INDEX_HOST`. From the repository root, ingest the bundled documents once:
+
+```powershell
+docker compose exec backend python -m services.document_ingest docs
 ```
 
-### 2. Backend
+This writes document vectors to your Pinecone knowledge namespace and can consume its embedding quota. Existing documents are replaced only after new records are uploaded and visible. Startup does not re-ingest documents. Private account memories use separate namespaces.
 
-```bash
-cd backend
-python -m venv .venv
-.venv\Scripts\activate        # Windows
-# source .venv/bin/activate   # macOS/Linux
+### Useful commands
 
-pip install -r requirements.txt
-
-# Create backend/.env with the variables listed above, then run migrations
-# for the Alembic-managed tables (users, preferences):
-alembic upgrade head
-
-uvicorn main:app --reload --port 8000
+```powershell
+docker compose ps
+docker compose logs -f backend
+docker compose down
 ```
 
-`conversations`/`chat_history` don't need a migration — they're created/kept in sync automatically on startup (see `db/bootstrap.py`).
+`down` preserves database volumes. Do not use `down -v` if you want to retain accounts and chats. After code changes, run `docker compose up -d --build` again.
 
-Check it's up: [http://127.0.0.1:8000/health](http://127.0.0.1:8000/health)
+| Service | Local address |
+| --- | --- |
+| App | http://localhost:8080 |
+| API health | http://localhost:8000/health |
+| API docs | http://localhost:8000/docs |
 
-### 3. Frontend
+Ports 8080, 8000 and 6379 must be available. This Compose configuration uses local development credentials and HTTP; a public deployment needs its own secrets and HTTPS configuration. Password-reset emails additionally require Resend configuration.
 
-```bash
+## Architecture
+
+```mermaid
+flowchart LR
+    UI[React + TypeScript] --> N[Nginx: same-origin API proxy]
+    N --> API[FastAPI]
+    API --> PG[(PostgreSQL: users and chats)]
+    API --> R[(Redis: auth limits and revocation)]
+    API --> C[Context routing and trip preflight]
+    C --> P[(Pinecone: public documents / private memory)]
+    C --> L[Local budget and climate tools]
+    P --> B[Prompt builder]
+    L --> B
+    B --> G[Groq: structured response]
+    G --> V[Budget, fee and trip validation]
+    V --> S[Persist successful reply and deliver over SSE]
+    S --> UI
+```
+
+The normal successful planning path uses **one LLM completion**. Tool arguments for deterministic budget/climate lookups are resolved locally, and places/itinerary generation reuse the existing filtered KB lookup. There is no separate LLM tool-selection request. Validation corrections and recovery can require additional completions.
+
+The prompt retains user instructions, offered options and the newest full itinerary. Older assistant plans retain summaries, trip facts and day titles while repeated source metadata and budget tables are omitted. Validation still receives the original history. Venue-location instructions are included when relevant, and shared budget rules are sent once.
+
+SSE delivers the result, but generated text is held until validation finishes. The visible typing effect is a frontend reveal of that validated reply, so a long answer can still have an initial wait.
+
+## Stack and layout
+
+| Layer | Technologies |
+| --- | --- |
+| Frontend | React 19, TypeScript, Vite, Tailwind CSS, Zustand, Framer Motion |
+| Backend | Python, FastAPI, Pydantic, SQLAlchemy, Alembic |
+| Storage | PostgreSQL, Redis, Pinecone |
+| AI | Groq (`openai/gpt-oss-120b`), document RAG, deterministic local tools |
+| Verification | pytest, Vitest, React Testing Library |
+| Runtime | Docker Compose, Nginx |
+
+```text
+backend/
+  routes/       Auth, preferences and chat APIs
+  services/     Retrieval, context routing, AI generation and validation
+  db/           Users, conversations and persistence
+  docs/         Bundled travel PDFs and reviewed timetable transcription
+  tests/        Isolated regressions and external-service integration tests
+frontend/
+  src/          Chat UI, authentication, settings and state stores
+  tests/        Component, store and API-client tests
+docs/
+  screenshots/  Actual application captures
+  engineering.md
+docker-compose.yml
+```
+
+## Try the conversation flow
+
+Send this in a new chat:
+
+> Plan a 3-day solo trip to Kandy starting from Colombo, with 2 overnight stays. My total budget is LKR 45000, including accommodation, vegetarian meals, transport and activities. Prefer train travel. Show the budget breakdown and disclose assumptions. Do not invent entrance fees.
+
+Then send:
+
+> Make it 2 days with 1 overnight stay. Keep the starting point, destination, food preference, train preference and total budget.
+
+Check that the day count, nights and budget breakdown agree. Log out and back in to check that the conversation is restored. A separate grounding check is:
+
+> What is the current entrance fee for Brief Garden? Give an exact amount only if your available sources verify it. Otherwise say you cannot verify it.
+
+## Tests
+
+Frontend (Node.js 22.12+):
+
+```powershell
 cd frontend
-npm install
-npm run dev
-```
-
-Open the URL Vite prints (typically [http://localhost:5173](http://localhost:5173)).
-
-## Running Tests
-
-```bash
-# Backend
-cd backend
-pytest
-
-# Frontend
-cd frontend
+npm ci
 npm test
+npm run build
 ```
 
-## Key Features
+For a focused backend regression run, use the configured Python environment from `backend/`:
 
-- SSE chat delivery with a typewriter reveal for validated summaries, itineraries and budget allocations; validation finishes before text becomes visible
-- LLM function-calling for seasonal climate references, estimated budgets, and knowledge-base places
-- Hard total budget caps, exact category allocations, and explicit notices that admission fees and actual prices need confirmation
-- A single server-calculated budget breakdown; generated itinerary prose does not invent separate meal, hotel or transfer quotes
-- Sourced venue-location checks for a small curated catalogue, with corrections that preserve requested stops
-- Attraction-addition edits compare named visits with the previous itinerary so unchanged or merely reworded plans are rejected
-- Retrieval-augmented itinerary suggestions from a Pinecone-backed travel knowledge base
-- Persistent, per-account travel-preferences memory (destinations, budget, hotel/transport/food style)
-- JWT + CSRF-protected authentication with Redis-backed rate limiting and session revocation
-- Account-scoped conversation history ("Recent Chats")
-
-## Travel knowledge ingestion and checks
-
-Run these from `backend/` with the virtual environment active:
-
-```bash
-python -m services.document_ingest docs
-python -m scripts.eval_kb --cases tests/eval_rag_cases.json
+```powershell
+python -m pytest tests/test_prompt_efficiency.py tests/test_followup_context.py tests/test_generation_recovery.py tests/test_provider_retry.py -q
 ```
 
-Ingestion stages a fresh document version, waits until all new records can be
-fetched, and only then prunes the old version. Empty extraction, upload failure,
-or a visibility timeout preserves the old version. Local jobs use a file lock;
-run jobs sequentially if multiple deployment hosts share the same index.
+These tests mock generation and retrieval boundaries; they do not spend Groq tokens or write to Pinecone. Backend module imports still require the configured environment and installed dependencies. The full backend suite includes real-service tests that can create test accounts and consume external API quota; run it against a dedicated test environment.
 
-Text PDFs retain page metadata. Scanned pages use local Windows OCR when its
-language pack is available; Linux needs `poppler-utils` and `tesseract-ocr`
-with English language data. No document is sent to a remote OCR service.
-OCR output is marked unverified because table columns can lose alignment.
+[Engineering notes](docs/engineering.md) cover manual setup, environment variables, ingestion and the validation policies in more detail.
 
-The bundled `Train-Timetable.pdf.text.json` is a **partial, visually reviewed
-transcription** of selected Coastal Line rows from the dated **2025-12-02**
-notice. It is tied to the PDF's SHA-256 fingerprint; changing the PDF requires
-reviewing/regenerating the companion text. It is not a complete timetable or
-a live service check, and does not establish a Colombo–Kandy departure.
+## Known limitations
 
-Chat and retrieval tools share evidence filtering: similarity, meaningful text
-overlap, named-venue matching and duplicate removal. `KB_MIN_SCORE` defaults to
-`0.25` as a retrieval guard, not a confidence percentage. Tune it using positive
-and unsupported cases for your documents. Sources list retrieved references;
-retrieval alone does not prove every generated sentence is supported.
-
-Factual questions, attraction lists and preference acknowledgements use plain
-answers rather than itinerary days or trip-overview cards. Preference-only
-messages skip public KB searches, and factual enquiries are not learned as
-personal travel preferences. Named-place evidence must match the requested
-venue even when the prompt also says "do not invent". Unsupported factual
-questions return an explicit verification limit with no source chips. The
-current KB does not contain maintained official visa rules, so visa enquiries
-ask for nationality/purpose/dates and direct the user to the official authority
-without guessing eligibility, validity periods or visa-on-arrival rules.
-
-Completion requests use one bounded retry for temporary rate-limit/server
-errors, honouring `Retry-After` up to a 20-second automatic cooldown. Longer
-cooldowns return a clear retry message instead of retrying early. Streaming
-cooldowns yield cancellation checkpoints. Provider timeouts and rate limits
-have separate safe messages and `error_code`/`retry_after_seconds` metadata;
-failed generations are not saved as completed chat exchanges or learned as
-preferences. Backend diagnostics record the stage, exception type, HTTP status
-and retry delay without printing provider error bodies or private prompts.
-
-Itineraries disclose provisional starting points, traveller counts, nights and
-missing travel dates in a progressively revealed **Planning assumptions** section.
-User-stated details override defaults and persist through follow-up edits; assumed
-values never become user-stated facts. A request not to assume keeps missing
-details unknown. Close spelling drift in requested destination names (for example,
-Kandy becoming Kanda in an activity) triggers validation and a correction attempt,
-without silently rewriting place names supplied by the user.
-
-Budget allocations identify their source as the user's stated trip cap, a confirmed
-saved budget preference, or a suggested estimate. Generated estimates are never
-learned as the user's budget preference. New explicit chat budgets and manual
-Settings saves establish confirmed budget provenance; legacy unmarked ranges are
-retained in storage but excluded from personalization until confirmed. Saved
-preferences are advisory, not new hard caps. Day trips with zero overnight stays
-have no accommodation allowance; other category allowances still sum exactly.
-
-Pinecone private memory uses the authenticated account identity, independently
-of the browser session. Anonymous requests do not read/write persistent vector
-memory. Old browser-session memory namespaces are retained but never read or
-automatically migrated because their ownership cannot be established safely.
-
-The extended evaluation covers routing, expected sources and unsupported queries;
-`--direct` bypasses routing for diagnosis. Mocked regressions also cover both chat
-transports, account switching, provider outages and failed ingestion. These are
-not a substitute for checking generated answers against current venue/operator
-information.
+- **External quotas still apply.** Reducing calls and context saves requests/input, but cannot reset a Groq quota or eliminate HTTP 429 responses. The backend honours provider retry delays, automatically retries short transient failures once, and reports longer cooldowns. Check your provider account quota before a live demo; restarting Docker does not reset it.
+- **No live pricing, bookings or weather.** Budget categories are allocations. Entrance fees, transport availability and affordability require confirmation. Climate tools return seasonal reference data.
+- **Static, partial knowledge.** The bundled timetable is a partial reviewed transcription of a **2025-12-02** notice, not a live timetable or evidence of a Colombo-Kandy service. Visa rules are not maintained in the KB.
+- **RAG and validation have limits.** A source title means a relevant passage was retrieved, not that every generated sentence was verified. Venue-location checks cover a small curated catalogue. Generated plans still need human review.
+- **Local deployment scope.** The project demonstrates a working travel-planning workflow; hosting, production operations and a current travel-data service are separate work.

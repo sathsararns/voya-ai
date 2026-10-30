@@ -26,6 +26,7 @@ from typing import Any, Dict, List, Optional
 from services.history_manager import FOOD_KEYWORDS, HOTEL_KEYWORDS, TRANSPORT_KEYWORDS
 from services.context_router import is_information_only_request
 from services.budget import extract_budget_cap, saved_budget_range
+from services.preference_policy import learning_disabled
 
 # Not covered by history_manager.py's existing keyword maps (those are about
 # accommodation/transport/food specifically) — activity interests and
@@ -90,6 +91,8 @@ def extract_and_merge_preferences(
     Everything else is a keyword scan of the user's raw message text.
     """
     prefs: Dict[str, Any] = dict(existing or {})
+    if learning_disabled(user_message) or reply_data.get("_skip_preference_learning"):
+        return prefs
     if is_information_only_request(user_message):
         # Asking about a train timetable or a vegetarian restaurant is not
         # itself consent to treat that subject as a persistent preference.

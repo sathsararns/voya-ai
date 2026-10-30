@@ -5,6 +5,7 @@ live road travel times. Prices and opening hours are deliberately omitted.
 """
 
 import re
+from services.trip_state import scoped_trip_history
 
 VENUE_FACTS = (
     {
@@ -112,7 +113,8 @@ def validate_venue_placement(data: dict, known_destinations) -> list[str]:
 def validate_required_venues(message: str, data: dict, history=None) -> list[str]:
     if not data.get("itinerary"):
         return []
-    messages = [turn.get("content", "") for turn in history or [] if turn.get("role") == "user"]
+    history = scoped_trip_history(message, history)
+    messages = [turn.get("content", "") for turn in history if turn.get("role") == "user"]
     messages.append(message)
     required = {}
     for text in messages:

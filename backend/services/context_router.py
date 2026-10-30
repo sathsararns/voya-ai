@@ -18,6 +18,7 @@ produced. See decide_context_strategy() for the entry point.
 from dataclasses import dataclass, field
 import re
 from typing import List
+from services.preference_policy import planning_text
 
 
 @dataclass
@@ -29,16 +30,9 @@ class ContextDecision:
     use_summarized_context: bool
     use_knowledge_base: bool
     route_reason: str
-    # Tool names (see services/tools.py's TOOL_SCHEMAS) plausibly relevant to
-    # this message, e.g. ["get_weather", "calculate_budget"] — empty means
-    # skip the tool-calling round entirely for this message (see
-    # groq_service.py's _run_tool_calling_phase). This is a MENU, not a
-    # decision to actually call anything: the model still gets to choose,
-    # via its own tool_choice="auto" call, whether to use any of these,
-    # exactly one, or several — this just keeps that choice scoped to a
-    # short, relevant list instead of always offering every tool to every
-    # message (same "don't pay for a round trip nothing needs" philosophy
-    # this whole module already applies to memory/history/KB).
+    # Relevant capabilities for this request. Budget/climate tools run
+    # locally only when their arguments are known; places and itinerary
+    # planning reuse the filtered KB lookup. No model selection call.
     candidate_tools: List[str] = field(default_factory=list)
 
 
@@ -102,13 +96,8 @@ DESTINATIONS = {
 }
 
 
-# Keyword groups that route to a SPECIFIC tool (see services/tools.py) —
-# deliberately separate from KNOWLEDGE_BASE_KEYWORDS even though some
-# overlap (e.g. "weather"): a factual weather QUESTION still uses the
-# knowledge base exactly as before, and now ALSO offers the model the
-# get_weather tool for structured, numeric-ish data — offering a tool never
-# removes the knowledge-base path, the two are independent and can both
-# fire for the same message.
+# Capability gates are independent from KB routing. For example a climate
+# question can use both guide evidence and a local seasonal reference.
 WEATHER_TOOL_KEYWORDS = {
     "weather", "climate", "temperature", "rain", "rainy", "monsoon",
     "forecast", "how hot", "how cold", "what to pack",
@@ -142,10 +131,21 @@ def is_options_request(user_message: str) -> bool:
     ))
 
 
+def is_itinerary_edit(message: str) -> bool:
+    message = planning_text(message)
+    return bool(re.search(
+        r"\b(?:change|modify|update|remove|add|reduce|increase|make|revise|adjust|extend|shorten|switch|keep)\b"
+        r"[^.!?\n]{0,100}\b(?:days?|nights?|trip|tour|budget|attractions?|itinerary|duration|overnight stay|"
+        r"starting point|travell?ers?|arrival date|departure date)\b",
+        message, re.I,
+    ))
+
+
 def is_preference_statement(message: str) -> bool:
     text = message.lower()
     return bool(_contains_any(text, PREFERENCE_KEYWORDS)
                 and not _contains_any(text, PLANNING_KEYWORDS)
+                and not is_itinerary_edit(message)
                 and not re.search(r"\?|\b(?:what|which|how|where|when|why|can you|could you)\b", text))
 
 
@@ -160,9 +160,8 @@ def is_information_only_request(message: str) -> bool:
         # Stating desired hotels/meals/transport is a planning constraint,
         # even when it contains the same nouns as factual travel questions.
         return False
-    if _contains_any(text, PLANNING_KEYWORDS) or re.search(
-        r"\b(?:create|build|give|show|revise|adjust|design|prepare)(?:\s+me)?\s+(?:an?\s+)?itinerary\b"
-        r"|\b(?:change|modify|update|remove|add|reduce|increase|make)\b.{0,45}\b(?:day|trip|budget|attraction|itinerary)\b",
+    if _contains_any(text, PLANNING_KEYWORDS) or is_itinerary_edit(message) or re.search(
+        r"\b(?:create|build|give|show|revise|adjust|design|prepare)(?:\s+me)?\s+(?:an?\s+)?itinerary\b",
         text,
     ):
         return False
@@ -185,7 +184,7 @@ def decide_context_strategy(user_message: str, conversation_message_count: int) 
     is_greeting = text.strip(" .!?,") in GREETING_KEYWORDS
     is_preference = _contains_any(text, PREFERENCE_KEYWORDS)
     preference_only = is_preference_statement(user_message)
-    is_followup = _contains_any(text, FOLLOWUP_KEYWORDS)
+    is_followup = _contains_any(text, FOLLOWUP_KEYWORDS) or is_itinerary_edit(user_message)
     is_planning = _contains_any(text, PLANNING_KEYWORDS)
     is_factual_question = (
         _contains_any(text, KNOWLEDGE_BASE_KEYWORDS)
