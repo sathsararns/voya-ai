@@ -1,4 +1,5 @@
 import os
+from hashlib import sha256
 from datetime import datetime
 from typing import Any, Dict, List, Optional
 
@@ -19,16 +20,23 @@ if not PINECONE_INDEX_HOST:
 pc = Pinecone(api_key=PINECONE_API_KEY)
 index = pc.Index(host=PINECONE_INDEX_HOST)
 
-# Used only if a request somehow arrives without a session_id. The frontend
-# always generates and persists one, so this should rarely be hit — it just
-# keeps such requests isolated instead of falling back to one shared pool.
-FALLBACK_NAMESPACE = "unscoped"
+# Browser sessions still scope anonymous conversation history. Persistent
+# vector memory is scoped separately, using an authenticated account only.
+def memory_scope_for_user(user_id: Any) -> Optional[str]:
+    """Use the authenticated server identity, never a browser-supplied id.
+
+    Legacy session namespaces have no trustworthy owner and are deliberately
+    not migrated/read. Anonymous requests have no persistent private memory.
+    """
+    if user_id is None:
+        return None
+    return "account_" + sha256(str(user_id).encode("utf-8")).hexdigest()
 
 
-def _namespace_for_session(session_id: Optional[str]) -> str:
+def _namespace_for_session(session_id: Optional[str]) -> Optional[str]:
     if session_id and session_id.strip():
         return f"session_{session_id.strip()}"
-    return FALLBACK_NAMESPACE
+    return None
 
 
 def save_memory(
@@ -37,7 +45,7 @@ def save_memory(
     text: str,
     metadata: Optional[Dict[str, Any]] = None,
 ) -> None:
-    if not text:
+    if not text or not _namespace_for_session(session_id):
         return
 
     try:
@@ -56,6 +64,8 @@ def save_memory(
 
 
 def search_memory(session_id: Optional[str], query_text: str, top_k: int = 3) -> List[Dict[str, Any]]:
+    if not _namespace_for_session(session_id):
+        return []
     try:
         result = index.search(
             namespace=_namespace_for_session(session_id),

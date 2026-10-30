@@ -32,9 +32,9 @@ from services.user_preferences import extract_and_merge_preferences, format_pref
 
 
 class TestExtractAndMergePreferences:
-    def test_learns_destination_days_and_budget_from_the_validated_reply(self):
+    def test_learns_destination_days_and_explicit_user_budget(self):
         prefs = extract_and_merge_preferences(
-            None, "Plan a trip", {"destination": "Kandy", "days": 3, "budget_lkr": 30000}
+            None, "Plan a trip. My total budget is LKR 30000", {"destination": "Kandy", "days": 3, "budget_lkr": 25000}
         )
         assert prefs["preferred_destinations"] == ["Kandy"]
         assert prefs["typical_trip_duration_days"] == 3
@@ -53,8 +53,8 @@ class TestExtractAndMergePreferences:
         assert prefs["activity_preferences"] == ["Hiking"]
 
     def test_expands_the_budget_range_across_turns_instead_of_overwriting_it(self):
-        prefs = extract_and_merge_preferences(None, "msg1", {"budget_lkr": 20000})
-        prefs = extract_and_merge_preferences(prefs, "msg2", {"budget_lkr": 45000})
+        prefs = extract_and_merge_preferences(None, "My budget is LKR 20000", {"budget_lkr": 15000})
+        prefs = extract_and_merge_preferences(prefs, "My budget is LKR 45000", {"budget_lkr": 35000})
         assert prefs["budget_lkr_min"] == 20000
         assert prefs["budget_lkr_max"] == 45000
 
@@ -90,6 +90,7 @@ class TestFormatPreferencesContext:
                 "preferred_destinations": ["Kandy"],
                 "budget_lkr_min": 20000,
                 "budget_lkr_max": 20000,
+                "budget_preference_source": "user_provided",
                 "hotel_style": "Luxury hotel",
                 "travel_style": "Luxury",
             }

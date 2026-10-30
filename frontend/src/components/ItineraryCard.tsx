@@ -30,7 +30,7 @@ export function ItineraryCard({ plan, fallback, revealCharacters }: {
   fallback: string
   revealCharacters?: number
 }) {
-  const { days, budgetHeading, budgetNote, budgetRows, feeNotice, followUpQuestion } = getVisibleItinerary(plan, revealCharacters)
+  const { assumptionsHeading, assumptions, days, budgetHeading, budgetSource, budgetNote, budgetRows, feeNotice, followUpQuestion } = getVisibleItinerary(plan, revealCharacters)
   const revealing = revealCharacters !== undefined
 
   // Built as a list (rather than adjacent JSX chips) so a real separator can
@@ -64,7 +64,7 @@ export function ItineraryCard({ plan, fallback, revealCharacters }: {
 
   return (
     <div className="space-y-4">
-      {metaChips.length > 0 && (
+      {(plan.itinerary?.length ?? 0) > 0 && metaChips.length > 0 && (
         <div>
           <p className="mb-1.5 text-[11px] font-semibold uppercase tracking-wide text-faint">
             Trip overview
@@ -88,6 +88,17 @@ export function ItineraryCard({ plan, fallback, revealCharacters }: {
       )}
 
       <p className="whitespace-pre-wrap text-[15px] leading-6 text-ink">{plan.summary || fallback}</p>
+
+      {assumptionsHeading && (
+        <section aria-label="Planning assumptions" className="rounded-xl border border-line bg-canvas/70 p-3.5">
+          <h3 className="text-[14px] font-semibold text-ink">{assumptionsHeading}</h3>
+          {assumptions.length > 0 && (
+            <ul className="mt-2 list-disc space-y-1 pl-4 text-[13px] leading-5 text-muted">
+              {assumptions.map((assumption, index) => <li key={index}>{assumption}</li>)}
+            </ul>
+          )}
+        </section>
+      )}
 
       {days.length > 0 && (
         <ol className="space-y-2.5">
@@ -113,6 +124,7 @@ export function ItineraryCard({ plan, fallback, revealCharacters }: {
       {budgetHeading && (
         <section className="rounded-xl border border-line bg-canvas/70 p-3.5">
           <h3 className="text-[14px] font-semibold text-ink">{budgetHeading}</h3>
+          {budgetSource && <p className="mt-1 text-[13px] font-medium text-ink">{budgetSource}</p>}
           {budgetNote && <p className="mt-1 text-[12.5px] leading-5 text-muted">{budgetNote}</p>}
           {budgetRows.length > 0 && (
             <table aria-label="Estimated budget allocation" className="mt-3 w-full text-[13.5px]">

@@ -124,3 +124,80 @@ npm test
 - Persistent, per-account travel-preferences memory (destinations, budget, hotel/transport/food style)
 - JWT + CSRF-protected authentication with Redis-backed rate limiting and session revocation
 - Account-scoped conversation history ("Recent Chats")
+
+## Travel knowledge ingestion and checks
+
+Run these from `backend/` with the virtual environment active:
+
+```bash
+python -m services.document_ingest docs
+python -m scripts.eval_kb --cases tests/eval_rag_cases.json
+```
+
+Ingestion stages a fresh document version, waits until all new records can be
+fetched, and only then prunes the old version. Empty extraction, upload failure,
+or a visibility timeout preserves the old version. Local jobs use a file lock;
+run jobs sequentially if multiple deployment hosts share the same index.
+
+Text PDFs retain page metadata. Scanned pages use local Windows OCR when its
+language pack is available; Linux needs `poppler-utils` and `tesseract-ocr`
+with English language data. No document is sent to a remote OCR service.
+OCR output is marked unverified because table columns can lose alignment.
+
+The bundled `Train-Timetable.pdf.text.json` is a **partial, visually reviewed
+transcription** of selected Coastal Line rows from the dated **2025-12-02**
+notice. It is tied to the PDF's SHA-256 fingerprint; changing the PDF requires
+reviewing/regenerating the companion text. It is not a complete timetable or
+a live service check, and does not establish a Colombo–Kandy departure.
+
+Chat and retrieval tools share evidence filtering: similarity, meaningful text
+overlap, named-venue matching and duplicate removal. `KB_MIN_SCORE` defaults to
+`0.25` as a retrieval guard, not a confidence percentage. Tune it using positive
+and unsupported cases for your documents. Sources list retrieved references;
+retrieval alone does not prove every generated sentence is supported.
+
+Factual questions, attraction lists and preference acknowledgements use plain
+answers rather than itinerary days or trip-overview cards. Preference-only
+messages skip public KB searches, and factual enquiries are not learned as
+personal travel preferences. Named-place evidence must match the requested
+venue even when the prompt also says "do not invent". Unsupported factual
+questions return an explicit verification limit with no source chips. The
+current KB does not contain maintained official visa rules, so visa enquiries
+ask for nationality/purpose/dates and direct the user to the official authority
+without guessing eligibility, validity periods or visa-on-arrival rules.
+
+Completion requests use one bounded retry for temporary rate-limit/server
+errors, honouring `Retry-After` up to a 20-second automatic cooldown. Longer
+cooldowns return a clear retry message instead of retrying early. Streaming
+cooldowns yield cancellation checkpoints. Provider timeouts and rate limits
+have separate safe messages and `error_code`/`retry_after_seconds` metadata;
+failed generations are not saved as completed chat exchanges or learned as
+preferences. Backend diagnostics record the stage, exception type, HTTP status
+and retry delay without printing provider error bodies or private prompts.
+
+Itineraries disclose provisional starting points, traveller counts, nights and
+missing travel dates in a progressively revealed **Planning assumptions** section.
+User-stated details override defaults and persist through follow-up edits; assumed
+values never become user-stated facts. A request not to assume keeps missing
+details unknown. Close spelling drift in requested destination names (for example,
+Kandy becoming Kanda in an activity) triggers validation and a correction attempt,
+without silently rewriting place names supplied by the user.
+
+Budget allocations identify their source as the user's stated trip cap, a confirmed
+saved budget preference, or a suggested estimate. Generated estimates are never
+learned as the user's budget preference. New explicit chat budgets and manual
+Settings saves establish confirmed budget provenance; legacy unmarked ranges are
+retained in storage but excluded from personalization until confirmed. Saved
+preferences are advisory, not new hard caps. Day trips with zero overnight stays
+have no accommodation allowance; other category allowances still sum exactly.
+
+Pinecone private memory uses the authenticated account identity, independently
+of the browser session. Anonymous requests do not read/write persistent vector
+memory. Old browser-session memory namespaces are retained but never read or
+automatically migrated because their ownership cannot be established safely.
+
+The extended evaluation covers routing, expected sources and unsupported queries;
+`--direct` bypasses routing for diagnosis. Mocked regressions also cover both chat
+transports, account switching, provider outages and failed ingestion. These are
+not a substitute for checking generated answers against current venue/operator
+information.

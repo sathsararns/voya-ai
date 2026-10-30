@@ -33,7 +33,7 @@ from db.crud import (
     touch_conversation,
     update_user_preferences,
 )
-from pinecone_memory import save_memory
+from pinecone_memory import memory_scope_for_user, save_memory
 from memory_utils import build_memory_text
 from services.user_preferences import extract_and_merge_preferences
 from routes.auth import get_current_user_optional
@@ -107,6 +107,7 @@ def chat(
 ):
     session_id = request.session_id or FALLBACK_SESSION_ID
     user_id = current_user.id if current_user else None
+    memory_scope = memory_scope_for_user(user_id)
     conversation = get_or_create_conversation(db, session_id, request.conversation_id, user_id=user_id)
     conversation_id = conversation.conversation_id
 
@@ -134,9 +135,9 @@ def chat(
 
     reply_data = get_groq_reply(
         request.message,
-        session_id,
+        memory_scope,
         history=history,
-        use_memory=decision.use_pinecone_memory,
+        use_memory=decision.use_pinecone_memory and memory_scope is not None,
         use_knowledge_base=decision.use_knowledge_base,
         candidate_tools=decision.candidate_tools,
         # None for an anonymous caller — get_groq_reply/_build_prompt_messages
@@ -145,15 +146,19 @@ def chat(
         user_preferences=current_user.preferences if current_user else None,
     )
 
+    if reply_data.get("error_code"):
+        reply_data["conversation_id"] = conversation_id
+        return reply_data
+
     save_chat(db, request.message, reply_data, session_id, conversation_id)
     touch_conversation(db, conversation_id, title=_default_title(request.message))
     _learn_preferences(db, current_user, request.message, reply_data)
 
     memory_text = build_memory_text(request.message, reply_data)
 
-    if memory_text:
+    if memory_text and memory_scope is not None:
         save_memory(
-            session_id=session_id,
+            session_id=memory_scope,
             memory_id=str(uuid4()),
             text=memory_text,
             metadata={
@@ -224,6 +229,7 @@ def chat_stream(
     """
     session_id = request.session_id or FALLBACK_SESSION_ID
     user_id = current_user.id if current_user else None
+    memory_scope = memory_scope_for_user(user_id)
     conversation = get_or_create_conversation(db, session_id, request.conversation_id, user_id=user_id)
     conversation_id = conversation.conversation_id
 
@@ -266,9 +272,9 @@ def chat_stream(
 
         reply_generator = stream_groq_reply(
             request.message,
-            session_id,
+            memory_scope,
             history=history,
-            use_memory=decision.use_pinecone_memory,
+            use_memory=decision.use_pinecone_memory and memory_scope is not None,
             use_knowledge_base=decision.use_knowledge_base,
             candidate_tools=decision.candidate_tools,
             user_preferences=current_user.preferences if current_user else None,
@@ -347,6 +353,11 @@ def chat_stream(
             yield _sse_event("error", {"detail": SERVICE_UNAVAILABLE_DETAIL})
             return
 
+        if reply_data.get("error_code"):
+            reply_data["conversation_id"] = conversation_id
+            yield _sse_event("done", reply_data)
+            return
+
         # Generation genuinely finished (reply_data is set) — this is no
         # longer "an aborted generation" even if the client's connection
         # drops at this exact moment (a real disconnect that lands here
@@ -373,10 +384,10 @@ def chat_stream(
                 await run_in_threadpool(_learn_preferences, db, current_user, request.message, reply_data)
 
                 memory_text = build_memory_text(request.message, reply_data)
-                if memory_text:
+                if memory_text and memory_scope is not None:
                     await run_in_threadpool(
                         save_memory,
-                        session_id=session_id,
+                        session_id=memory_scope,
                         memory_id=str(uuid4()),
                         text=memory_text,
                         metadata={

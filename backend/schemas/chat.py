@@ -1,7 +1,7 @@
 from datetime import datetime, timezone
 
 from pydantic import BaseModel, Field, field_validator
-from typing import List, Optional
+from typing import List, Literal, Optional
 
 
 def _as_utc(value: datetime) -> datetime:
@@ -40,6 +40,10 @@ class KBSource(BaseModel):
     chunk_index: Optional[int] = None
     score: Optional[float] = None
     snippet: str
+    page_number: Optional[int] = None
+    source_date: Optional[str] = None
+    route_origin: Optional[str] = None
+    route_destination: Optional[str] = None
 
 
 class BudgetBreakdown(BaseModel):
@@ -52,12 +56,29 @@ class BudgetBreakdown(BaseModel):
     is_estimate: bool = True
 
 
+class PlanningContext(BaseModel):
+    starting_point: Optional[str] = None
+    starting_point_source: Literal["user", "assumed", "unknown"] = "unknown"
+    travellers: Optional[int] = None
+    travellers_source: Literal["user", "assumed", "unknown"] = "unknown"
+    nights: Optional[int] = None
+    nights_source: Literal["user", "assumed", "unknown"] = "unknown"
+    dates: Optional[str] = None
+    dates_source: Literal["user", "assumed", "unknown"] = "unknown"
+
+
 class ChatResponse(BaseModel):
+    error_code: Optional[str] = None
+    retry_after_seconds: Optional[int] = None
     destination: Optional[str] = None
     days: Optional[int] = None
     budget_lkr: Optional[int] = None
     budget_cap_lkr: Optional[int] = None
     budget_breakdown: Optional[BudgetBreakdown] = None
+    budget_source: Optional[Literal["user_provided", "saved_preference", "estimate"]] = None
+    budget_note: Optional[str] = None
+    assumptions: List[str] = Field(default_factory=list)
+    planning_context: Optional[PlanningContext] = None
     fee_notice: Optional[str] = None
     summary: str
     itinerary: List[ItineraryDay] = Field(default_factory=list)

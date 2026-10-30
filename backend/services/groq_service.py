@@ -7,15 +7,19 @@ from dotenv import load_dotenv
 
 from json_utils import normalize_chat_response
 from pinecone_memory import format_memory_context
-from services.kb_rag import build_kb_sources, format_kb_context, search_knowledge_base
+from services.kb_rag import KnowledgeBaseUnavailable, build_kb_sources, format_kb_context, search_knowledge_base
+from services.retrieval_policy import build_search_query
 from services.response_validator import validate_ai_response
 from services.tools import TOOL_SCHEMAS, execute_tool_call
 from services.user_preferences import format_preferences_context
-from services.context_router import is_options_request
+from services.context_router import is_options_request, is_preference_statement
+from services.answer_policy import information_fallback, non_trip_answer, normalize_answer_shape
 from services.budget import BUDGET_PRESENTATION_INSTRUCTION, attach_budget_details, resolve_budget_cap
 from services.fee_policy import FEE_INSTRUCTION, FEE_NOTICE
 from services.venue_facts import venue_location_context
 from services.itinerary_edits import addition_prompt_context
+from services.planning_context import attach_planning_context, planning_prompt_context
+from services.provider_retry import failure_details, log_failure, open_completion_stream, request_completion
 
 load_dotenv()
 
@@ -131,7 +135,7 @@ def _call_groq(client: Groq, messages: List[Dict[str, str]], temperature: float)
     final_messages = messages + [{"role": "system", "content": FINAL_ANSWER_INSTRUCTION}]
     for attempt in range(2):
         try:
-            response = client.chat.completions.create(
+            response = request_completion(client,
                 model=GROQ_MODEL,
                 messages=final_messages,
                 reasoning_effort="low",
@@ -152,7 +156,7 @@ def _call_groq(client: Groq, messages: List[Dict[str, str]], temperature: float)
     raise IncompleteGenerationError("No complete response")
 
 
-def _fallback_reply(summary: str) -> dict:
+def _fallback_reply(summary: str, error_code: str = "generation_failed", retry_after_seconds=None) -> dict:
     """The safe, schema-valid stand-in used whenever a reply couldn't
     actually be produced (missing API key, Groq/network failure, etc.) —
     shared by get_groq_reply and stream_groq_reply so both surface exactly
@@ -165,10 +169,18 @@ def _fallback_reply(summary: str) -> dict:
         "budget_lkr": None,
         "summary": summary,
         "itinerary": [],
-        "follow_up_question": "Please try again.",
+        "follow_up_question": None,
         "kb_sources": [],
         "tools_used": [],
+        "error_code": error_code,
+        "retry_after_seconds": retry_after_seconds,
     }
+
+
+def _provider_failure_reply(stage: str, error: Exception) -> dict:
+    log_failure(stage, error)
+    code, message, delay = failure_details(error)
+    return _fallback_reply(message, code, delay)
 
 
 # System prompt for the separate, lightweight tool-decision call (see
@@ -237,7 +249,7 @@ def _run_tool_calling_phase(
             temperature=0.2,
         )
     except Exception as e:
-        print(f"[tools] tool-decision call failed: {e}")
+        log_failure("tool_decision", e)
         return "", []
 
     tool_calls = getattr(response.choices[0].message, "tool_calls", None) or []
@@ -271,6 +283,7 @@ def _build_prompt_messages(
     api_key: str,
     candidate_tools: Optional[List[str]] = None,
     user_preferences: Optional[Dict[str, object]] = None,
+    retrieval_state: Optional[dict] = None,
 ) -> Tuple[List[Dict[str, str]], List[dict], List[str]]:
     """Shared setup for both get_groq_reply and stream_groq_reply: the
     memory/KB/tool/preferences lookups, the system prompt, and the final
@@ -287,11 +300,20 @@ def _build_prompt_messages(
 
     # One KB search, reused for both the prompt text (kb_context) and the
     # UI source citations (kb_sources) — avoids a second Pinecone call and
-    # guarantees the citations shown to the user are exactly the chunks
-    # that actually grounded the answer.
-    kb_hits = search_knowledge_base(user_message, top_k=4) if use_knowledge_base else []
+    # keeps the reference list consistent with the evidence made available
+    # to generation. Retrieval does not prove every generated claim.
+    kb_hits = []
+    kb_status = "not_requested"
+    if use_knowledge_base and not is_preference_statement(user_message):
+        try:
+            kb_hits = search_knowledge_base(build_search_query(user_message, history), top_k=4)
+            kb_status = "evidence_found" if kb_hits else "no_supporting_evidence"
+        except KnowledgeBaseUnavailable:
+            kb_status = "unavailable"
     kb_context = format_kb_context(kb_hits)
     kb_sources = build_kb_sources(kb_hits)
+    if retrieval_state is not None:
+        retrieval_state["status"] = kb_status
 
     # A separate, throwaway Groq client for the tool-decision round only —
     # cheap to construct (same pattern get_groq_reply/stream_groq_reply
@@ -299,8 +321,10 @@ def _build_prompt_messages(
     # main generation client makes the two calls' independence explicit.
     tool_context = ""
     tool_names_used: List[str] = []
-    if candidate_tools:
-        tool_client = Groq(api_key=api_key)
+    if candidate_tools and not is_preference_statement(user_message):
+        # Optional tool selection does not spend additional SDK retries;
+        # final generation owns the bounded recovery/cooldown.
+        tool_client = Groq(api_key=api_key, timeout=20, max_retries=0)
         tool_context, tool_names_used = _run_tool_calling_phase(
             tool_client, user_message, candidate_tools, history=history
         )
@@ -316,6 +340,23 @@ def _build_prompt_messages(
     preferences_context = format_preferences_context(user_preferences)
 
     system_prompt = SYSTEM_PROMPT
+    if non_trip_answer(user_message):
+        system_prompt += (
+            "\nThis is a factual question, attraction list or preference acknowledgement, "
+            "not a request to build a trip. Answer entirely in summary (use bullets "
+            "there if useful). Set itinerary to [], destination/days/budget_lkr "
+            "to null. Do not invent day containers or entrance-fee notices.\n"
+        )
+    if use_knowledge_base:
+        system_prompt += (
+            f"\nKnowledge retrieval status: {kb_status}. "
+            "Only the supplied references support sourced factual claims. "
+            "If no supporting evidence was found, say the requested fact cannot "
+            "be verified from the available sources. If unavailable, explain "
+            "the knowledge lookup temporarily failed. Do not invent citations, "
+            "fees, opening hours or train departures. You may still offer a "
+            "clearly labelled tentative itinerary without guaranteeing live facts.\n"
+        )
     if is_options_request(user_message):
         system_prompt += (
             "\nThe user is comparing travel options, not choosing a trip yet. "
@@ -326,6 +367,7 @@ def _build_prompt_messages(
         )
     if preferences_context:
         system_prompt += f"\n{preferences_context}\n"
+    system_prompt += planning_prompt_context(user_message, history)
     if memory_context:
         system_prompt += f"\n{memory_context}\n"
     if kb_context:
@@ -377,12 +419,31 @@ def _make_retry(client: Groq, messages: List[Dict[str, str]]):
     return retry_with_feedback
 
 
-def _prepare_reply(user_message: str, normalized: dict, retry_fn, history=None) -> dict:
-    validated = validate_ai_response(user_message, normalized, retry_fn, history=history)
-    validated = attach_budget_details(validated, resolve_budget_cap(user_message, history))
+def _prepare_reply(user_message: str, normalized: dict, retry_fn, history=None, user_preferences=None) -> dict:
+    normalized = normalize_answer_shape(user_message, normalized)
+    def retry_with_shape(issues):
+        return normalize_answer_shape(user_message, retry_fn(issues))
+    validated = validate_ai_response(user_message, normalized, retry_with_shape, history=history, user_preferences=user_preferences)
+    if non_trip_answer(user_message):
+        return normalize_answer_shape(user_message, validated)
+    validated = attach_planning_context(validated, user_message, history)
+    validated = attach_budget_details(validated, resolve_budget_cap(user_message, history), preferences=user_preferences)
     if validated.get("itinerary"):
         validated["fee_notice"] = FEE_NOTICE
     return validated
+
+
+def _attach_retrieval_details(reply: dict, sources: list[dict]) -> None:
+    reply["kb_sources"] = sources
+    # A dated timetable must never look like a current service guarantee,
+    # even when the model omits the prompt's caveat. This is server-owned.
+    dates = sorted({s["source_date"] for s in sources if s.get("route_origin") and s.get("source_date")})
+    if dates:
+        reply["summary"] = reply["summary"].rstrip() + (
+            "\n\nTrain reference: notice dated " + ", ".join(dates)
+            + " (partial reviewed transcription). Services may have changed; "
+            "confirm current departures with Sri Lanka Railways before travel."
+        )
 
 
 def get_groq_reply(
@@ -399,6 +460,7 @@ def get_groq_reply(
         raise RuntimeError("GROQ_API_KEY is missing")
 
     try:
+        retrieval_state = {}
         messages, kb_sources, tool_names_used = _build_prompt_messages(
             user_message,
             session_id,
@@ -408,20 +470,25 @@ def get_groq_reply(
             api_key,
             candidate_tools,
             user_preferences,
+            retrieval_state=retrieval_state,
         )
 
-        client = Groq(api_key=api_key)
+        direct = information_fallback(user_message, kb_sources, retrieval_state.get("status", ""))
+        if direct is not None:
+            direct.update(kb_sources=[], tools_used=tool_names_used)
+            return direct
+
+        client = Groq(api_key=api_key, timeout=45, max_retries=0)
         content = _call_groq(client, messages, temperature=0.4)
         normalized = normalize_chat_response(content)
 
-        validated = _prepare_reply(user_message, normalized, _make_retry(client, messages), history)
-        validated["kb_sources"] = kb_sources
+        validated = _prepare_reply(user_message, normalized, _make_retry(client, messages), history, user_preferences)
+        _attach_retrieval_details(validated, kb_sources)
         validated["tools_used"] = tool_names_used
         return validated
 
     except Exception as e:
-        print(f"[groq] reply failed: {type(e).__name__}")
-        return _fallback_reply(GENERATION_FAILURE_MESSAGE)
+        return _provider_failure_reply("reply", e)
 
 
 def stream_groq_reply(
@@ -492,6 +559,7 @@ def stream_groq_reply(
 
     completion_stream = None
     try:
+        retrieval_state = {}
         messages, kb_sources, tool_names_used = _build_prompt_messages(
             user_message,
             session_id,
@@ -501,12 +569,20 @@ def stream_groq_reply(
             api_key,
             candidate_tools,
             user_preferences,
+            retrieval_state=retrieval_state,
         )
 
-        client = Groq(api_key=api_key)
+        direct = information_fallback(user_message, kb_sources, retrieval_state.get("status", ""))
+        if direct is not None:
+            direct.update(kb_sources=[], tools_used=tool_names_used)
+            yield ("delta", direct["summary"])
+            yield ("done", direct)
+            return
+
+        client = Groq(api_key=api_key, timeout=45, max_retries=0)
         raw_chunks: List[str] = []
 
-        completion_stream = client.chat.completions.create(
+        for event, payload in open_completion_stream(client,
             model=GROQ_MODEL,
             messages=messages + [{"role": "system", "content": FINAL_ANSWER_INSTRUCTION}],
             reasoning_effort="low",
@@ -515,7 +591,11 @@ def stream_groq_reply(
             response_format={"type": "json_object"},
             tool_choice="none",
             stream=True,
-        )
+        ):
+            if event == "tick":
+                yield "tick", None
+            else:
+                completion_stream = payload
         finish_reason = None
         for chunk in completion_stream:
             if not chunk.choices:
@@ -551,8 +631,8 @@ def stream_groq_reply(
         json.loads(content)
         normalized = normalize_chat_response(content)
 
-        validated = _prepare_reply(user_message, normalized, _make_retry(client, messages), history)
-        validated["kb_sources"] = kb_sources
+        validated = _prepare_reply(user_message, normalized, _make_retry(client, messages), history, user_preferences)
+        _attach_retrieval_details(validated, kb_sources)
         validated["tools_used"] = tool_names_used
         yield ("delta", validated["summary"])
         yield ("done", validated)
@@ -565,16 +645,15 @@ def stream_groq_reply(
                     completion_stream = None
                 content = _call_groq(client, messages, temperature=0.2)
                 normalized = normalize_chat_response(content)
-                validated = _prepare_reply(user_message, normalized, _make_retry(client, messages), history)
-                validated["kb_sources"] = kb_sources
+                validated = _prepare_reply(user_message, normalized, _make_retry(client, messages), history, user_preferences)
+                _attach_retrieval_details(validated, kb_sources)
                 validated["tools_used"] = tool_names_used
                 yield ("delta", validated["summary"])
                 yield ("done", validated)
                 return
             except Exception as retry_error:
                 e = retry_error
-        print(f"[groq] streamed reply failed: {type(e).__name__}")
-        yield ("done", _fallback_reply(GENERATION_FAILURE_MESSAGE))
+        yield ("done", _provider_failure_reply("streamed_reply", e))
     finally:
         # Runs on every exit path: normal completion, the fallback above, AND
         # an early GeneratorExit from the caller closing us — release()/close()

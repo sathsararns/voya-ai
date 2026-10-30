@@ -14,6 +14,7 @@ backend/.pytest_cache/
 backend/.mypy_cache/
 backend/.ruff_cache/
 backend/.coverage
+backend/.knowledge-ingest.lock
 backend/htmlcov/
 backend/scripts/backups/
 

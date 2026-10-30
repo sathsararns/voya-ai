@@ -23,6 +23,10 @@ BUDGET_PRESENTATION_INSTRUCTION = (
     "explicitly stated previous total when explaining a budget reduction. "
     "Do not claim breakfast, rooms or transport are included in a booking: "
     "there are no verified booking quotes.\n"
+    "Do not call a generated estimate the user's usual, saved or stated budget. "
+    "Only an explicitly supplied trip cap is a stated budget. A saved budget "
+    "preference is advisory and requires confirmed account preference data. "
+    "Otherwise label any proposed total as a suggested planning estimate.\n"
 )
 
 _AMOUNT = r"(?P<amount>\d[\d,]*(?:\.\d+)?)(?:\s*(?P<scale>k|thousand))?\b"
@@ -171,16 +175,86 @@ def validate_budget_presentation(data: dict, history=None) -> list[str]:
     return issues
 
 
-def attach_budget_details(data: dict, budget_cap_lkr: Optional[int]) -> dict:
+def saved_budget_range(preferences=None):
+    preferences = preferences or {}
+    if preferences.get("budget_preference_source") != "user_provided":
+        return None
+    lower, upper = preferences.get("budget_lkr_min"), preferences.get("budget_lkr_max")
+    if lower is None:
+        lower = upper
+    if upper is None:
+        upper = lower
+    if type(lower) is not int or type(upper) is not int or not 0 <= lower <= upper:
+        return None
+    return lower, upper
+
+
+def validate_budget_origin(data: dict, budget_cap_lkr=None, preferences=None) -> list[str]:
+    if not data.get("itinerary"):
+        return []
+    summary = data.get("summary", "")
+    saved = saved_budget_range(preferences)
+    saved_pattern = (
+        r"\b(?:your|the user's)\s+(?:(?:saved|usual|typical|normal|regular|preferred|previous|past)\s+)+(?:total\s+)?budget"
+        r"|\b(?:saved|usual|typical|normal)\s+budget(?:\s+range|\s+preference)?\b"
+    )
+    def positive_claim(pattern):
+        for match in re.finditer(pattern, summary, re.I):
+            clause = re.split(r"[.!?;,\n]", summary[max(0, match.start() - 90):match.start()])[-1]
+            if re.search(r"\b(?:no|not|without|unknown|unverified|haven't|hasn't|isn't|wasn't)\b", clause, re.I):
+                continue
+            if re.match(r"\s+(?:(?:is|was|has|been)\s+)*(?:not|unknown|unverified)\b", summary[match.end():], re.I):
+                continue
+            return True
+        return False
+    saved_claim = positive_claim(saved_pattern)
+    if saved_claim and saved is None:
+        return ["There is no confirmed saved budget preference. Do not claim this estimate is the user's usual or saved budget; label it as a suggested estimate."]
+    if saved_claim and saved is not None:
+        total = data.get("budget_lkr")
+        if type(total) is int and not saved[0] <= total <= saved[1]:
+            return [f"The proposed total is outside the confirmed saved budget range {saved}; do not claim it fits that range."]
+    if budget_cap_lkr is None and not saved_claim and positive_claim(
+        r"\b(?:your|the user's)\s+(?:(?:stated|given|provided|specified|total)\s+)*"
+        r"(?:(?:LKR|Rs\.?)\s*[\d,]+\s+)?budget\b"
+    ):
+        return ["No user-stated budget exists for this trip. Present the total as a suggested estimate, not 'your budget'."]
+    return []
+
+
+def attach_budget_details(data: dict, budget_cap_lkr: Optional[int], *, preferences=None) -> dict:
     result = dict(data)
     # Never carry a model-generated or stale breakdown into the response.
     result.pop("budget_breakdown", None)
+    result.pop("budget_source", None)
+    result.pop("budget_note", None)
+    result.pop("budget_cap_lkr", None)
     if budget_cap_lkr is not None:
         result["budget_cap_lkr"] = budget_cap_lkr
     total, days = result.get("budget_lkr"), result.get("days")
     if result.get("itinerary") and type(total) is int and total > 0 and type(days) is int and days > 0:
         allocation = calculate_budget(days, total, travel_style="budget")
+        if (result.get("planning_context") or {}).get("nights") == 0:
+            # A day trip needs no overnight allowance. Rescale the remaining
+            # planning categories, preserving the exact total and buffer.
+            weights = BREAKDOWN_PERCENTAGES_BY_STYLE["budget"]
+            remaining = 100 - weights["accommodation"]
+            breakdown = {f"{key}_lkr": (0 if key == "accommodation" else total * weight // remaining)
+                         for key, weight in weights.items()}
+            breakdown["misc_lkr"] += total - sum(breakdown.values())
+            allocation["breakdown_lkr"] = breakdown
         result["budget_breakdown"] = {
             **allocation["breakdown_lkr"], "total_lkr": total, "is_estimate": True,
         }
+        saved = saved_budget_range(preferences)
+        if budget_cap_lkr is not None:
+            result.update(budget_source="user_provided",
+                          budget_note=f"Your stated total budget cap is LKR {budget_cap_lkr:,}. Category amounts are planning allowances, not verified quotes.")
+        elif saved and saved[0] <= total <= saved[1]:
+            saved_label = f"LKR {saved[0]:,}" if saved[0] == saved[1] else f"LKR {saved[0]:,}–{saved[1]:,}"
+            result.update(budget_source="saved_preference",
+                          budget_note=f"Uses your saved budget preference ({saved_label}). Confirm this trip's spending limit; these are planning allowances, not verified quotes.")
+        else:
+            result.update(budget_source="estimate",
+                          budget_note="Suggested planning estimate; please confirm your total budget. Category amounts are allowances, not verified quotes.")
     return result

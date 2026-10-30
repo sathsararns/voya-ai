@@ -24,7 +24,10 @@ from typing import Any, Callable, Dict, List
 
 from json_utils import CHAT_RESPONSE_DEFAULTS
 from services.context_router import is_options_request
-from services.budget import resolve_budget_cap, validate_budget_presentation
+from services.answer_policy import non_trip_answer
+from services.budget import resolve_budget_cap, validate_budget_presentation, validate_budget_origin
+from services.destination_spelling import validate_destination_spelling
+from services.planning_context import validate_planning_context
 from services.fee_policy import validate_fee_claims
 from services.venue_facts import validate_required_venues, validate_venue_placement
 from services.itinerary_edits import validate_attraction_addition
@@ -126,6 +129,11 @@ def matches_request(user_message: str, data: dict, budget_cap_lkr=None) -> List[
     lower_message = user_message.lower()
     response_blob = _response_text_blob(data)
 
+    if non_trip_answer(user_message):
+        if data.get("itinerary"):
+            issues.append("Answer this factual question or preference acknowledgement in summary, with itinerary empty.")
+        return issues
+
     if is_options_request(user_message):
         if data.get("itinerary"):
             issues.append(
@@ -202,6 +210,7 @@ def repair_or_retry(
     retry_fn: Callable[[List[str]], dict],
     max_retries: int = 1,
     history=None,
+    user_preferences=None,
 ) -> dict:
     """Validate `data`; if it fails, ask `retry_fn` for a corrected version
     (passing the specific issues found) up to `max_retries` times. Falls
@@ -223,6 +232,9 @@ def repair_or_retry(
             issues.extend(validate_venue_placement(data, KNOWN_DESTINATIONS))
             issues.extend(validate_required_venues(user_message, data, history))
             issues.extend(validate_attraction_addition(user_message, data, history))
+            issues.extend(validate_destination_spelling(user_message, data, KNOWN_DESTINATIONS, history))
+            issues.extend(validate_budget_origin(data, budget_cap_lkr, user_preferences))
+            issues.extend(validate_planning_context(user_message, data, history))
 
         if not issues:
             return data
@@ -240,6 +252,7 @@ def validate_ai_response(
     retry_fn: Callable[[List[str]], dict],
     max_retries: int = 1,
     history=None,
+    user_preferences=None,
 ) -> dict:
     """Entry point: validate a Groq response and repair/retry/fall back as needed."""
-    return repair_or_retry(user_message, raw_data, retry_fn, max_retries, history=history)
+    return repair_or_retry(user_message, raw_data, retry_fn, max_retries, history=history, user_preferences=user_preferences)

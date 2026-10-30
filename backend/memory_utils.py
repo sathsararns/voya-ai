@@ -1,12 +1,18 @@
+from services.context_router import is_information_only_request
+from services.budget import extract_budget_cap
+
+
 def build_memory_text(user_message: str, reply_data: dict) -> str:
+    if is_information_only_request(user_message):
+        return ""
     parts = []
 
     destination = reply_data.get("destination")
     days = reply_data.get("days")
-    budget = reply_data.get("budget_lkr")
+    budget = extract_budget_cap(user_message)
 
     if budget:
-        parts.append("User likes budget travel.")
+        parts.append(f"User previously stated a total trip budget cap of LKR {budget}.")
     if days:
         parts.append(f"User often plans {days}-day trips.")
     if destination:
@@ -22,7 +28,7 @@ def build_memory_text(user_message: str, reply_data: dict) -> str:
         parts.append("User may want family-friendly trips.")
     if "luxury" in lower_msg:
         parts.append("User may prefer luxury travel.")
-    if "budget" in lower_msg:
+    if any(phrase in lower_msg for phrase in ("budget-friendly", "budget travel", "low budget", "budget trip")):
         parts.append("User prefers budget-friendly travel.")
 
     return " ".join(parts).strip()

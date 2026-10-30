@@ -1,22 +1,13 @@
-"""Evaluation harness for the Pinecone knowledge-base RAG retrieval layer.
+"""Evaluate chat routing plus evidence-filtered retrieval against Pinecone.
 
-Runs a fixed set of factual travel queries straight through
-services.kb_rag.search_knowledge_base — the exact same retrieval call
-groq_service.py makes before every Groq request — and checks whether the
-retrieved chunks actually contain the expected keywords and come from the
-expected source document.
-
-This evaluates RETRIEVAL quality specifically: deterministic, no LLM call,
-no Groq API cost, no dependence on the model's phrasing that day. It is
-deliberately NOT an end-to-end "does the chatbot's final answer look right"
-eval — that would mean scoring non-deterministic LLM output, which cuts
-against the "deterministic and simple" goal here. If the retrieval layer
-reliably surfaces the right grounding chunks, the Groq prompt (see
-groq_service.py) already instructs the model to ground its answer in them.
+No LLM calls. This checks retrieval/routing, not final-answer factuality.
+Negative cases must retrieve no evidence; provider outages always fail.
+Use --direct to diagnose retrieval independently of routing.
 
 Run from the backend folder:
     python -m scripts.eval_kb
     python -m scripts.eval_kb --cases tests/eval_cases.json --top-k 4
+    python -m scripts.eval_kb --cases tests/eval_rag_cases.json
 """
 
 import argparse
@@ -26,7 +17,8 @@ import sys
 import time
 from typing import Any, Dict, List
 
-from services.kb_rag import search_knowledge_base
+from services.kb_rag import KnowledgeBaseUnavailable, search_knowledge_base
+from services.context_router import decide_context_strategy
 
 DEFAULT_CASES_PATH = os.path.join("tests", "eval_cases.json")
 DEFAULT_TOP_K = 4
@@ -49,14 +41,20 @@ def _combined_text(hits: List[Dict[str, Any]]) -> str:
     return " ".join((h.get("fields", {}).get("text") or "") for h in hits).lower()
 
 
-def evaluate_case(case: Dict[str, Any], top_k: int) -> Dict[str, Any]:
+def evaluate_case(case: Dict[str, Any], top_k: int, through_router: bool = True) -> Dict[str, Any]:
     """Run one test case's query through real retrieval and score it."""
     query = case["query"]
     expected_keywords = [k.lower() for k in case.get("expected_keywords", [])]
     expected_source = case.get("expected_source")
 
     start = time.perf_counter()
-    hits = search_knowledge_base(query, top_k=top_k)
+    routed = decide_context_strategy(query, 0).use_knowledge_base
+    unavailable = False
+    try:
+        hits = search_knowledge_base(query, top_k=top_k) if routed or not through_router else []
+    except KnowledgeBaseUnavailable:
+        hits = []
+        unavailable = True
     latency_ms = (time.perf_counter() - start) * 1000
 
     combined = _combined_text(hits)
@@ -67,11 +65,17 @@ def evaluate_case(case: Dict[str, Any], top_k: int) -> Dict[str, Any]:
     retrieved_sources = [h.get("fields", {}).get("document_name") for h in hits]
     source_matched = expected_source is None or expected_source in retrieved_sources
 
-    passed = bool(hits) and keyword_ratio >= KEYWORD_MATCH_THRESHOLD and source_matched
+    expects_no_evidence = case.get("expect_no_evidence", False)
+    passed = (not hits if expects_no_evidence else bool(hits) and keyword_ratio >= KEYWORD_MATCH_THRESHOLD and source_matched)
+    passed = passed and not unavailable
+    if through_router:
+        passed = passed and routed == case.get("expect_kb", True)
 
     return {
         "query": query,
         "passed": passed,
+        "routed_to_kb": routed,
+        "unavailable": unavailable,
         "matched_keywords": matched_keywords,
         "missing_keywords": missing_keywords,
         "expected_source": expected_source,
@@ -83,9 +87,9 @@ def evaluate_case(case: Dict[str, Any], top_k: int) -> Dict[str, Any]:
     }
 
 
-def run(cases_path: str, top_k: int) -> List[Dict[str, Any]]:
+def run(cases_path: str, top_k: int, through_router: bool = True) -> List[Dict[str, Any]]:
     cases = load_cases(cases_path)
-    return [evaluate_case(case, top_k) for case in cases]
+    return [evaluate_case(case, top_k, through_router=through_router) for case in cases]
 
 
 def print_report(results: List[Dict[str, Any]]) -> None:
@@ -100,6 +104,7 @@ def print_report(results: List[Dict[str, Any]]) -> None:
         status = "PASS" if r["passed"] else "FAIL"
         print(f"[{status}] {r['query']}")
         print(f"       matched keywords : {r['matched_keywords'] or '(none)'}")
+        print(f"       routed to KB: {r['routed_to_kb']} | retrieval unavailable: {r['unavailable']}")
         if r["missing_keywords"]:
             print(f"       missing keywords : {r['missing_keywords']}")
         print(f"       expected source  : {r['expected_source']}")
@@ -132,6 +137,7 @@ def _parse_args(argv: List[str]) -> argparse.Namespace:
         default=DEFAULT_TOP_K,
         help=f"top_k passed to search_knowledge_base for each query (default: {DEFAULT_TOP_K})",
     )
+    parser.add_argument("--direct", action="store_true", help="Bypass routing to diagnose retrieval alone.")
     return parser.parse_args(argv)
 
 
@@ -142,7 +148,7 @@ if __name__ == "__main__":
         print(f"Eval cases file not found: {args.cases}")
         sys.exit(1)
 
-    results = run(args.cases, args.top_k)
+    results = run(args.cases, args.top_k, through_router=not args.direct)
     print_report(results)
 
     failed = sum(1 for r in results if not r["passed"])

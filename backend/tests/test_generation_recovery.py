@@ -30,7 +30,7 @@ PLAN = {
     "destination": "Galle, Mirissa and Bentota",
     "days": 5,
     "budget_lkr": 45000,
-    "summary": "A coastal trip within your LKR 45,000 budget.",
+    "summary": "A coastal trip with an estimated total of LKR 45,000.",
     "itinerary": [{"day": 1, "title": "Arrival", "items": ["Check in", "Explore Galle Fort"]}],
     "follow_up_question": None,
 }

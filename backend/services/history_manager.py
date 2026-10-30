@@ -22,6 +22,7 @@ from sqlalchemy.orm import Session
 
 from db.crud import count_conversation_messages, get_conversation_messages, get_recent_messages
 from db.models import ChatHistory
+from services.budget import extract_budget_cap
 
 # How many of the most recent exchanges are always sent to Groq verbatim,
 # whether or not summarization is active.
@@ -99,6 +100,7 @@ def _summarize_messages(records: List[ChatHistory]) -> str:
     destination: Optional[str] = None
     days: Optional[int] = None
     budget_lkr: Optional[int] = None
+    budget_cap_lkr: Optional[int] = None
     hotel: Optional[str] = None
     transport: Optional[str] = None
     food: Optional[str] = None
@@ -122,6 +124,12 @@ def _summarize_messages(records: List[ChatHistory]) -> str:
         except (json.JSONDecodeError, TypeError):
             reply = {}
 
+        stated_cap = extract_budget_cap(record.user_message)
+        if stated_cap is not None:
+            budget_cap_lkr = stated_cap
+        elif type(reply.get("budget_cap_lkr")) is int:
+            budget_cap_lkr = reply["budget_cap_lkr"]
+
         for day in reply.get("itinerary") or []:
             title = (day or {}).get("title")
             if title and title not in seen_planned:
@@ -130,7 +138,8 @@ def _summarize_messages(records: List[ChatHistory]) -> str:
 
     lines = ["Previous conversation summary:", ""]
     lines.append(f"Destination: {destination or 'Not specified'}")
-    lines.append(f"Budget: {f'{budget_lkr} LKR' if budget_lkr else 'Not specified'}")
+    lines.append(f"User-stated total budget cap: {f'{budget_cap_lkr} LKR' if budget_cap_lkr is not None else 'Not specified'}")
+    lines.append(f"Last proposed trip estimate (not proof of a user preference): {f'{budget_lkr} LKR' if budget_lkr is not None else 'Not specified'}")
     lines.append(f"Days: {days if days is not None else 'Not specified'}")
 
     if hotel:

@@ -115,11 +115,10 @@ function createId(): string {
 // apiGetConversationMessages below); user_id, from the httpOnly session
 // cookie every authenticated request already sends, is the only thing
 // that ever scopes Recent Chats. It's still sent on send() (POST
-// /api/v1/chat/), where it has a different, unrelated job: Pinecone
-// conversational-memory continuity (see backend/pinecone_memory.py) and
-// the anonymous-caller fallback the backend still supports for direct API
+// /api/v1/chat/), where it scopes the anonymous-caller fallback for direct API
 // callers with no session cookie (see routes/chat.py's
-// get_current_user_optional) — not Recent Chats ownership. Falls back to
+// get_current_user_optional). Pinecone memory uses the server-authenticated
+// account identity, independently of this browser id. Falls back to
 // an in-memory id (and skips persistence) if localStorage is unavailable,
 // e.g. private browsing — the session is still consistent for the current
 // tab.

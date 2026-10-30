@@ -1,0 +1,37 @@
+{
+  "pdf_sha256": "88f9883a4ca306c54aa1bc849df4783839644f408f4737cbc054e528c67f8cf9",
+  "source_date": "2025-12-02",
+  "review_note": "Partial transcription visually checked against page 1 of the bundled scan. Only the rows below were transcribed. Not a complete timetable or a live service check. Do not infer AM/PM beyond the printed times.",
+  "pages": [
+    {
+      "page_number": 1,
+      "route_origin": "Maradana",
+      "route_destination": "Galle",
+      "text": "Sri Lanka Railways notice. Revised train timetable from 2025/12/02 onward (until further notice). PARTIAL REVIEWED TRANSCRIPTION of selected Coastal Line rows on page 1. Origin: Maradana. Destination: Galle. These services run from Maradana to Galle, not the reverse.\n\nMaradana to Galle: printed departure 17:25; service days: Daily.\nMaradana to Galle: printed departure 17:45; service days: Daily.\nMaradana to Galle: printed departure 18:45; service days: Daily.\n\nDated notice only, not live service confirmation or a complete timetable. Confirm current services with Sri Lanka Railways. Do not infer AM/PM beyond the printed times. This partial source does not establish departures on unlisted routes."
+    },
+    {
+      "page_number": 1,
+      "route_origin": "Colombo Fort",
+      "route_destination": "Matara",
+      "text": "Sri Lanka Railways notice. Revised train timetable from 2025/12/02 onward (until further notice). PARTIAL REVIEWED TRANSCRIPTION of selected Coastal Line rows on page 1. Origin: Colombo Fort. Destination: Matara. These services run from Colombo Fort to Matara, not the reverse.\n\nColombo Fort to Matara: printed departure 8:35; service days: Daily.\n\nDated notice only, not live service confirmation or a complete timetable. Confirm current services with Sri Lanka Railways. Do not infer AM/PM beyond the printed times. This partial source does not establish departures on unlisted routes."
+    },
+    {
+      "page_number": 1,
+      "route_origin": "Colombo Fort",
+      "route_destination": "Beliatta",
+      "text": "Sri Lanka Railways notice. Revised train timetable from 2025/12/02 onward (until further notice). PARTIAL REVIEWED TRANSCRIPTION of selected Coastal Line rows on page 1. Origin: Colombo Fort. Destination: Beliatta. These services run from Colombo Fort to Beliatta, not the reverse.\n\nColombo Fort to Beliatta: printed departure 10:30; service days: Daily.\n\nDated notice only, not live service confirmation or a complete timetable. Confirm current services with Sri Lanka Railways. Do not infer AM/PM beyond the printed times. This partial source does not establish departures on unlisted routes."
+    },
+    {
+      "page_number": 1,
+      "route_origin": "Galle",
+      "route_destination": "Maradana",
+      "text": "Sri Lanka Railways notice. Revised train timetable from 2025/12/02 onward (until further notice). PARTIAL REVIEWED TRANSCRIPTION of selected Coastal Line rows on page 1. Origin: Galle. Destination: Maradana. These services run from Galle to Maradana, not the reverse.\n\nGalle to Maradana: printed departure 3:15; service days: No Sat & Sun.\nGalle to Maradana: printed departure 4:10; service days: Daily.\nGalle to Maradana: printed departure 5:00; service days: No Sunday.\nGalle to Maradana: printed departure 8:50; service days: No Sunday.\n\nDated notice only, not live service confirmation or a complete timetable. Confirm current services with Sri Lanka Railways. Do not infer AM/PM beyond the printed times. This partial source does not establish departures on unlisted routes."
+    },
+    {
+      "page_number": 1,
+      "route_origin": "Aluthgama",
+      "route_destination": "Colombo Fort",
+      "text": "Sri Lanka Railways notice. Revised train timetable from 2025/12/02 onward (until further notice). PARTIAL REVIEWED TRANSCRIPTION of selected Coastal Line rows on page 1. Origin: Aluthgama. Destination: Colombo Fort. These services run from Aluthgama to Colombo Fort, not the reverse.\n\nAluthgama to Colombo Fort: printed departure 3:15; service days: Daily.\nAluthgama to Colombo Fort: printed departure 3:40; service days: Daily.\n\nDated notice only, not live service confirmation or a complete timetable. Confirm current services with Sri Lanka Railways. Do not infer AM/PM beyond the printed times. This partial source does not establish departures on unlisted routes."
+    }
+  ]
+}

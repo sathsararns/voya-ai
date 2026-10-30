@@ -8,6 +8,7 @@ import { cleanup, render, screen, within } from '@testing-library/react'
 import '@testing-library/jest-dom/vitest'
 import { ItineraryCard } from '../src/components/ItineraryCard'
 import type { ChatResponse } from '../src/types'
+import { getItineraryRevealText } from '../src/lib/itineraryReveal'
 
 afterEach(() => {
   cleanup()
@@ -24,6 +25,60 @@ const basePlan: ChatResponse = {
 }
 
 describe('ItineraryCard — Tools used chips', () => {
+  it('reveals explicit assumptions before day cards without showing them all at once', () => {
+    const plan: ChatResponse = {
+      ...basePlan,
+      assumptions: ['Starting point: Colombo (assumed; please confirm).', 'Travellers: 1 (assumed).'],
+    }
+    const { rerender } = render(
+      <ItineraryCard plan={plan} fallback={plan.summary} revealCharacters={'Planning assumptions'.length + 8} />,
+    )
+    const assumptions = screen.getByRole('region', { name: 'Planning assumptions' })
+    expect(within(assumptions).getByText('Starting')).toBeInTheDocument()
+    expect(screen.queryByText('Day 1')).not.toBeInTheDocument()
+    expect(screen.queryByText('Travellers: 1 (assumed).')).not.toBeInTheDocument()
+
+    rerender(<ItineraryCard plan={plan} fallback={plan.summary} />)
+    expect(screen.getByText(plan.assumptions![0])).toBeInTheDocument()
+    expect(screen.getByText('Day 1')).toBeInTheDocument()
+    expect(getItineraryRevealText(plan)).toContain('Planning assumptions' + plan.assumptions!.join(''))
+  })
+
+  it.each([
+    ['user_provided', 'Based on your stated budget'],
+    ['saved_preference', 'Based on your saved budget preference'],
+    ['estimate', 'Suggested estimate'],
+  ] as const)('shows the %s budget provenance with its explanation', (source, label) => {
+    const plan: ChatResponse = {
+      ...basePlan, budget_source: source, budget_note: 'Category amounts are planning allowances, not verified quotes.',
+      budget_breakdown: {
+        accommodation_lkr: 13500, food_lkr: 13500, transport_lkr: 11250,
+        activities_lkr: 4500, misc_lkr: 2250, total_lkr: 45000, is_estimate: true,
+      },
+    }
+    const { rerender } = render(<ItineraryCard plan={plan} fallback={plan.summary} />)
+    expect(screen.getByText(label)).toBeInTheDocument()
+    expect(screen.getByText(plan.budget_note!)).toBeInTheDocument()
+    expect(getItineraryRevealText(plan)).toContain(label)
+
+    const daysText = 'Day 1ArrivalCheck inTemple of the Sacred Tooth Relic'
+    rerender(<ItineraryCard plan={plan} fallback={plan.summary}
+      revealCharacters={daysText.length + 'Estimated budget allocation'.length + label.length} />)
+    expect(screen.getByText(label)).toBeInTheDocument()
+    expect(screen.queryByText(plan.budget_note!)).not.toBeInTheDocument()
+    expect(screen.queryByRole('table')).not.toBeInTheDocument()
+  })
+
+  it('shows a factual answer without a trip overview even if destination metadata is present', () => {
+    const plan: ChatResponse = {
+      destination: 'Kandy', summary: 'Kandy attractions include Kandy Lake.', itinerary: [],
+    }
+    render(<ItineraryCard plan={plan} fallback={plan.summary} />)
+    expect(screen.getByText(plan.summary)).toBeInTheDocument()
+    expect(screen.queryByText('Trip overview')).not.toBeInTheDocument()
+    expect(screen.queryByText('Day 1')).not.toBeInTheDocument()
+  })
+
   it('shows an explicitly estimated allocation with all categories and the total', () => {
     const plan: ChatResponse = {
       ...basePlan,

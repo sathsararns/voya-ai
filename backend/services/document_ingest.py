@@ -21,7 +21,8 @@ import re
 import sys
 from typing import Any, Dict, List, Optional
 
-from services.kb_rag import delete_document, search_knowledge_base, upsert_chunks
+from services.kb_rag import replace_document_chunks, search_knowledge_base, upsert_chunks
+from services.pdf_text import read_pdf_pages
 
 SUPPORTED_EXTENSIONS = {".txt", ".md", ".pdf"}
 
@@ -44,16 +45,7 @@ def _read_txt(path: str) -> str:
 
 
 def _read_pdf(path: str) -> str:
-    try:
-        from pypdf import PdfReader
-    except ImportError as e:
-        raise RuntimeError(
-            "pypdf is required to ingest PDFs — install it with `pip install pypdf`"
-        ) from e
-
-    reader = PdfReader(path)
-    pages = [page.extract_text() or "" for page in reader.pages]
-    return "\n\n".join(pages)
+    return "\n\n".join(page["text"] for page in read_pdf_pages(path))
 
 
 def load_document_text(path: str) -> str:
@@ -92,7 +84,9 @@ def chunk_text(text: str, chunk_size: int = CHUNK_SIZE, overlap: int = CHUNK_OVE
             current = candidate
         else:
             chunks.append(current)
-            tail = current[-overlap:] if overlap else ""
+            available = max(0, chunk_size - len(para) - 2)
+            keep = min(overlap, available)
+            tail = current[-keep:] if keep else ""
             current = f"{tail}\n\n{para}" if tail else para
 
     if current:
@@ -109,19 +103,19 @@ def build_chunks(
     chunk_index, document_name.
     """
     document_name = os.path.basename(path)
-    text = load_document_text(path)
-    pieces = chunk_text(text)
-
-    return [
-        {
-            "text": piece,
-            "document_name": document_name,
-            "title": title or document_name,
-            "source": source or path,
-            "chunk_index": i,
-        }
-        for i, piece in enumerate(pieces)
-    ]
+    pages = (read_pdf_pages(path) if os.path.splitext(path)[1].lower() == ".pdf"
+             else [{"text": load_document_text(path), "extraction_method": "text"}])
+    chunks = []
+    for page in pages:
+        for piece in chunk_text(page["text"]):
+            chunks.append({
+                "text": piece, "document_name": document_name,
+                "title": title or document_name, "source": source or path,
+                "chunk_index": len(chunks),
+                **{key: page[key] for key in ("page_number", "extraction_method", "source_date", "route_origin", "route_destination")
+                   if page.get(key) is not None},
+            })
+    return chunks
 
 
 def ingest_file(
@@ -132,28 +126,17 @@ def ingest_file(
 ) -> int:
     """Chunk and upsert a single file. Returns the number of chunks ingested.
 
-    replace=True (the default) deletes any existing chunks for this
-    document_name first, so re-running ingestion on the same file is safe —
-    it replaces the old chunks instead of piling up duplicates, and also
-    clears out stale trailing chunks if the document got shorter since the
-    last ingest (chunk ids alone can't catch that case; a same-named chunk
-    would just be overwritten, but a chunk that no longer exists wouldn't
-    be removed without this).
+    replace=True stages a fresh generation and verifies all records are
+    visible before pruning the old generation. Failed/empty extraction or
+    failed upload preserves previous knowledge. Run one ingestion job at a time.
     """
     document_name = os.path.basename(path)
     chunks = build_chunks(path, source=source, title=title)
 
-    if replace:
-        delete_document(document_name)
-
     if not chunks:
-        print(
-            f"[document_ingest] WARNING: no extractable text in {document_name} - "
-            "likely a scanned/image-only PDF (OCR is not implemented here). Skipped."
-        )
-        return 0
+        raise ValueError(f"No usable text in {document_name}; previous knowledge was preserved.")
 
-    upserted = upsert_chunks(chunks)
+    upserted = replace_document_chunks(document_name, chunks) if replace else upsert_chunks(chunks)
     print(f"[document_ingest] {document_name}: {upserted} chunk(s) upserted")
     return upserted
 

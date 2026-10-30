@@ -1,6 +1,12 @@
 import type { ChatResponse } from '../types'
 
 function getSections(plan: ChatResponse) {
+  const assumptions = plan.assumptions ?? []
+  const budgetLabels = {
+    user_provided: 'Based on your stated budget',
+    saved_preference: 'Based on your saved budget preference',
+    estimate: 'Suggested estimate',
+  }
   const budget = plan.budget_breakdown
   const budgetRows = budget ? [
     { id: 'accommodation', label: 'Accommodation', value: budget.accommodation_lkr },
@@ -11,6 +17,8 @@ function getSections(plan: ChatResponse) {
     { id: 'total', label: 'Total', value: budget.total_lkr },
   ].map((row) => ({ ...row, value: `${row.value.toLocaleString()} LKR` })) : []
   return {
+    assumptionsHeading: assumptions.length > 0 ? 'Planning assumptions' : '',
+    assumptions,
     days: (Array.isArray(plan.itinerary) ? plan.itinerary : []).map((day) => ({
       day: day.day,
       label: `Day ${day.day}`,
@@ -18,7 +26,8 @@ function getSections(plan: ChatResponse) {
       items: Array.isArray(day.items) ? day.items : [],
     })),
     budgetHeading: budget ? 'Estimated budget allocation' : '',
-    budgetNote: budget ? 'Planning allowances. Confirm actual prices for your dates, travellers and nights.' : '',
+    budgetSource: budget && plan.budget_source ? budgetLabels[plan.budget_source] : '',
+    budgetNote: budget ? (plan.budget_note ?? 'Planning allowances. Confirm actual prices for your dates, travellers and nights.') : '',
     budgetRows,
     feeNotice: plan.fee_notice ?? '',
     followUpQuestion: plan.follow_up_question ?? '',
@@ -28,8 +37,9 @@ function getSections(plan: ChatResponse) {
 // The timer and the card must count text in the same display order.
 export function getItineraryRevealText(plan: ChatResponse): string {
   const sections = getSections(plan)
-  return sections.days.flatMap((day) => [day.label, day.title, ...day.items])
-    .concat(sections.budgetHeading, sections.budgetNote)
+  return [sections.assumptionsHeading, ...sections.assumptions]
+    .concat(sections.days.flatMap((day) => [day.label, day.title, ...day.items]))
+    .concat(sections.budgetHeading, sections.budgetSource, sections.budgetNote)
     .concat(sections.budgetRows.flatMap((row) => [row.label, row.value]))
     .concat(sections.feeNotice)
     .concat(sections.followUpQuestion)
@@ -46,6 +56,8 @@ export function getVisibleItinerary(plan: ChatResponse, characterLimit = Infinit
   const sections = getSections(plan)
 
   return {
+    assumptionsHeading: take(sections.assumptionsHeading),
+    assumptions: sections.assumptions.map(take).filter(Boolean),
     days: sections.days.map((day) => ({
       day: day.day,
       label: take(day.label),
@@ -53,6 +65,7 @@ export function getVisibleItinerary(plan: ChatResponse, characterLimit = Infinit
       items: day.items.map(take).filter(Boolean),
     })).filter((day) => day.label.length > 0),
     budgetHeading: take(sections.budgetHeading),
+    budgetSource: take(sections.budgetSource),
     budgetNote: take(sections.budgetNote),
     budgetRows: sections.budgetRows.map((row) => ({
       id: row.id, label: take(row.label), value: take(row.value),

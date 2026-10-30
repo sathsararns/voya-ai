@@ -1,11 +1,7 @@
 """Persistent, account-scoped travel-preferences summary.
 
-Distinct from pinecone_memory.py's conversational memory: that's free-text,
-semantic-search retrieval scoped by session_id (a per-browser value that
-deliberately survives login/logout — see frontend/src/hooks/useAppStore.ts's
-getOrCreateSessionId), which makes it a poor fit for "remember this specific
-ACCOUNT's travel style" — a session_id can outlive one account and be reused
-by another in the same browser. This module instead maintains a small,
+Distinct from pinecone_memory.py's account-scoped free-text semantic memory,
+this module maintains a small,
 structured dict stored directly on the User row (db/models.py's
 User.preferences), keyed by nothing but the account's own primary key, so
 there is no shared namespace for two accounts to ever collide in — one
@@ -28,6 +24,8 @@ account after the fact.
 from typing import Any, Dict, List, Optional
 
 from services.history_manager import FOOD_KEYWORDS, HOTEL_KEYWORDS, TRANSPORT_KEYWORDS
+from services.context_router import is_information_only_request
+from services.budget import extract_budget_cap, saved_budget_range
 
 # Not covered by history_manager.py's existing keyword maps (those are about
 # accommodation/transport/food specifically) — activity interests and
@@ -87,13 +85,15 @@ def extract_and_merge_preferences(
     from that field" rather than erroring the whole chat turn over a
     preferences side-effect.
 
-    Structured facts (destination/days/budget) come straight from the
-    model's own validated JSON output — already normalized and validated by
-    the time this runs (see groq_service.py) — the same source
-    history_manager.py's own summarizer already trusts for the same fields.
+    Destination/days come from validated output. Budget preferences come
+    only from explicit user amounts, never from generated estimates.
     Everything else is a keyword scan of the user's raw message text.
     """
     prefs: Dict[str, Any] = dict(existing or {})
+    if is_information_only_request(user_message):
+        # Asking about a train timetable or a vegetarian restaurant is not
+        # itself consent to treat that subject as a persistent preference.
+        return prefs
     prefs.setdefault("preferred_destinations", [])
     prefs.setdefault("food_preferences", [])
     prefs.setdefault("activity_preferences", [])
@@ -106,12 +106,16 @@ def extract_and_merge_preferences(
     if isinstance(days, int) and not isinstance(days, bool):
         prefs["typical_trip_duration_days"] = days
 
-    budget_lkr = reply_data.get("budget_lkr")
-    if isinstance(budget_lkr, int) and not isinstance(budget_lkr, bool):
-        current_min = prefs.get("budget_lkr_min")
-        current_max = prefs.get("budget_lkr_max")
+    # A model estimate is not a preference. Legacy ranges have no evidence
+    # of user ownership and are not merged into a newly confirmed range.
+    budget_lkr = extract_budget_cap(user_message)
+    if budget_lkr is not None:
+        known_range = saved_budget_range(prefs)
+        current_min = known_range[0] if known_range else None
+        current_max = known_range[1] if known_range else None
         prefs["budget_lkr_min"] = budget_lkr if current_min is None else min(current_min, budget_lkr)
         prefs["budget_lkr_max"] = budget_lkr if current_max is None else max(current_max, budget_lkr)
+        prefs["budget_preference_source"] = "user_provided"
 
     hotel = _find_keyword(user_message, HOTEL_KEYWORDS)
     if hotel:
@@ -153,13 +157,13 @@ def format_preferences_context(preferences: Optional[Dict[str, Any]]) -> str:
     if destinations:
         lines.append(f"Has previously asked about: {', '.join(destinations)}.")
 
-    budget_min = preferences.get("budget_lkr_min")
-    budget_max = preferences.get("budget_lkr_max")
-    if isinstance(budget_min, int) and isinstance(budget_max, int):
+    confirmed_range = saved_budget_range(preferences)
+    if confirmed_range:
+        budget_min, budget_max = confirmed_range
         if budget_min == budget_max:
-            lines.append(f"Usual budget: around {budget_min:,} LKR.")
+            lines.append(f"Saved user-provided budget preference: {budget_min:,} LKR (advisory, not this trip's cap).")
         else:
-            lines.append(f"Usual budget range: {budget_min:,}-{budget_max:,} LKR.")
+            lines.append(f"Saved user-provided budget preference: {budget_min:,}-{budget_max:,} LKR (advisory, not this trip's cap).")
 
     duration = preferences.get("typical_trip_duration_days")
     if isinstance(duration, int):

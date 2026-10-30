@@ -25,11 +25,26 @@ export interface BudgetBreakdown {
 }
 
 export interface ChatResponse {
+  error_code?: string | null
+  retry_after_seconds?: number | null
   destination?: string | null
   days?: number | null
   budget_lkr?: number | null
   budget_cap_lkr?: number | null
   budget_breakdown?: BudgetBreakdown | null
+  budget_source?: 'user_provided' | 'saved_preference' | 'estimate' | null
+  budget_note?: string | null
+  assumptions?: string[]
+  planning_context?: {
+    starting_point: string | null
+    starting_point_source: 'user' | 'assumed' | 'unknown'
+    travellers: number | null
+    travellers_source: 'user' | 'assumed' | 'unknown'
+    nights: number | null
+    nights_source: 'user' | 'assumed' | 'unknown'
+    dates: string | null
+    dates_source: 'user' | 'assumed' | 'unknown'
+  } | null
   fee_notice?: string | null
   summary: string
   itinerary?: ItineraryDay[]

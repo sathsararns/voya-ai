@@ -88,6 +88,17 @@ KNOWLEDGE_BASE_KEYWORDS = {
     "things to do", "what to do", "places to visit", "worth visiting",
     "attractions", "must see", "must-see", "where to visit", "landmark",
     "tourist spot", "sightseeing",
+    "train", "trains", "rail", "railway", "timetable", "bus", "buses",
+    "tuk tuk", "tuk tuks", "tuktuk", "mosquito", "mosquitos", "mosquitoes",
+    "repellent", "temple", "museum", "fort", "waterfall", "falls",
+    "food", "cuisine", "what should i wear", "opening hours", "entrance fee",
+}
+
+DESTINATIONS = {
+    "sri lanka", "sri lankan", "colombo", "kandy", "galle", "mirissa",
+    "bentota", "ella", "jaffna", "sigiriya", "yala", "nuwara eliya",
+    "anuradhapura", "polonnaruwa", "dambulla", "trincomalee", "negombo",
+    "beruwala", "aluthgama", "matara", "hikkaduwa", "bambarakanda",
 }
 
 
@@ -117,7 +128,8 @@ ITINERARY_TOOL_KEYWORDS = {
 
 
 def _contains_any(text: str, phrases: set) -> bool:
-    return any(phrase in text for phrase in phrases)
+    # Whole phrases: "rain" must not match "train", nor "cost" -> "coast".
+    return any(re.search(r"(?<!\w)" + re.escape(phrase) + r"(?!\w)", text) for phrase in phrases)
 
 
 def is_options_request(user_message: str) -> bool:
@@ -128,6 +140,33 @@ def is_options_request(user_message: str) -> bool:
         r"|\b(?:give|show|list|suggest|offer)(?:\s+me)?(?:\s+some|\s+a few)?\s+options\b",
         text,
     ))
+
+
+def is_preference_statement(message: str) -> bool:
+    text = message.lower()
+    return bool(_contains_any(text, PREFERENCE_KEYWORDS)
+                and not _contains_any(text, PLANNING_KEYWORDS)
+                and not re.search(r"\?|\b(?:what|which|how|where|when|why|can you|could you)\b", text))
+
+
+def is_information_only_request(message: str) -> bool:
+    """Facts/lists are not day-by-day plans, even inside a planning chat."""
+    text = message.lower()
+    if is_options_request(message) or is_preference_statement(message):
+        return False
+    if re.search(r"\b(?:i|we)\s+(?:want|would like)\b", text) and not re.search(
+        r"\?|\b(?:know|learn|explain|requirements?|hours|fees?|visa|eta|timetable)\b", text,
+    ):
+        # Stating desired hotels/meals/transport is a planning constraint,
+        # even when it contains the same nouns as factual travel questions.
+        return False
+    if _contains_any(text, PLANNING_KEYWORDS) or re.search(
+        r"\b(?:create|build|give|show|revise|adjust|design|prepare)(?:\s+me)?\s+(?:an?\s+)?itinerary\b"
+        r"|\b(?:change|modify|update|remove|add|reduce|increase|make)\b.{0,45}\b(?:day|trip|budget|attraction|itinerary)\b",
+        text,
+    ):
+        return False
+    return bool(_contains_any(text, KNOWLEDGE_BASE_KEYWORDS | DESTINATIONS))
 
 
 def decide_context_strategy(user_message: str, conversation_message_count: int) -> ContextDecision:
@@ -144,11 +183,18 @@ def decide_context_strategy(user_message: str, conversation_message_count: int) 
 
     # Match the whole greeting: "hi" must not match "which" or "this".
     is_greeting = text.strip(" .!?,") in GREETING_KEYWORDS
-    is_short_command = word_count <= 2 and not is_greeting
     is_preference = _contains_any(text, PREFERENCE_KEYWORDS)
+    preference_only = is_preference_statement(user_message)
     is_followup = _contains_any(text, FOLLOWUP_KEYWORDS)
     is_planning = _contains_any(text, PLANNING_KEYWORDS)
-    is_factual_question = _contains_any(text, KNOWLEDGE_BASE_KEYWORDS)
+    is_factual_question = (
+        _contains_any(text, KNOWLEDGE_BASE_KEYWORDS)
+        or (_contains_any(text, DESTINATIONS) and not is_preference)
+        or is_planning
+    )
+    # Short travel queries ("Visa requirements", "Kandy attractions") still
+    # need evidence; only actual commands/choices bypass retrieval.
+    is_short_command = word_count <= 2 and not is_greeting and not is_factual_question
 
     # --- memory: worth it for preference statements (the whole point of
     # storing them) and for fresh planning requests (recalling past
@@ -180,7 +226,7 @@ def decide_context_strategy(user_message: str, conversation_message_count: int) 
     # question ("do I need a visa?") can show up alongside a planning
     # request or on its own, in a brand new conversation with no prior
     # turns, so it isn't gated on has_prior_history the way history is.
-    use_knowledge_base = is_factual_question and not is_greeting and not is_short_command
+    use_knowledge_base = is_factual_question and not is_greeting and not is_short_command and not preference_only
 
     # --- tools: same "skip it if the message obviously doesn't need it"
     # gate as everything else here. A message can trigger more than one
@@ -188,7 +234,7 @@ def decide_context_strategy(user_message: str, conversation_message_count: int) 
     # pack" plausibly wants itinerary + budget + weather all at once) — each
     # independently offered, none gated on the others.
     candidate_tools: List[str] = []
-    if not is_greeting and not is_short_command:
+    if not is_greeting and not is_short_command and not preference_only:
         if _contains_any(text, WEATHER_TOOL_KEYWORDS):
             candidate_tools.append("get_weather")
         if _contains_any(text, BUDGET_TOOL_KEYWORDS):

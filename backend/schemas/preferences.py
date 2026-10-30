@@ -108,4 +108,7 @@ class UserPreferencesUpdate(BaseModel):
         update_user_preferences) — same field set as UserPreferences, so a
         save followed by a reload round-trips exactly.
         """
-        return self.model_dump()
+        result = self.model_dump()
+        if self.budget_lkr_min is not None or self.budget_lkr_max is not None:
+            result["budget_preference_source"] = "user_provided"
+        return result
